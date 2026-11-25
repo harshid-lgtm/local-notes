@@ -47,18 +47,68 @@ export function createApi({ db, config, collab }) {
     if (ROLES.indexOf(role) > ROLES.indexOf(min)) fail(403, min === 'owner' ? 'Only owners can do that' : 'You have view-only access here');
     return role;
   }
+  // ---------------------------------------------------------------- page access
+  // A page is visible to: workspace owners; other workspace members unless the page (or an
+  // ancestor) is restricted, in which case only its creator keeps member access; and anyone the
+  // page or an ancestor is shared with. The nearest share wins; roles never go below a member's.
+  const RANK = { viewer: 1, editor: 2, owner: 3 };
+  const best = (a, b) => (!a ? b : !b ? a : RANK[a] >= RANK[b] ? a : b);
+  const pageById = (id) => db.get('SELECT * FROM pages WHERE id = ?', id);
+  function chainOf(page, lookup = pageById) {
+    const out = [];
+    const seen = new Set();
+    for (let p = page; p && !seen.has(p.id); p = p.parent_id ? lookup(p.parent_id) : null) { seen.add(p.id); out.push(p); }
+    return out;
+  }
+  function accessFor(userId, page, { chain = chainOf(page), wsRole = roleIn(userId, page.workspace_id), shares = null } = {}) {
+    if (wsRole === 'owner') return 'owner';
+    let shareRole = null;
+    for (const p of chain) {
+      const s = shares ? shares.get(p.id) : db.get('SELECT role FROM page_shares WHERE page_id = ? AND user_id = ?', p.id, userId)?.role;
+      if (s) { shareRole = s; break; }
+    }
+    const restrictedBy = chain.find((p) => p.access === 'restricted');
+    if (wsRole && !restrictedBy) return best(wsRole, shareRole);
+    if (wsRole && restrictedBy.created_by === userId) return best(wsRole === 'viewer' ? 'editor' : wsRole, shareRole);
+    return shareRole;
+  }
+  const pageRole = (userId, pageId) => { const p = pageById(pageId); return p && !p.deleted_at ? accessFor(userId, p) : null; };
+  const canManage = (userId, page, role = accessFor(userId, page)) => role === 'owner' || (role === 'editor' && chainOf(page).some((p) => p.created_by === userId));
+
   function pageFor(user, pageId, min = 'viewer') {
-    const p = db.get('SELECT * FROM pages WHERE id = ?', pageId);
+    const p = pageById(pageId);
     if (!p) fail(404, 'Page not found');
-    const role = requireRole(user, p.workspace_id, min);
+    const role = accessFor(user.id, p);
+    if (!role) fail(404, 'Page not found');
+    if (RANK[role] < RANK[min]) fail(403, 'You have view-only access to this page');
     return { page: p, role };
   }
+
+  // Every page of a workspace this person may see, with their role on each (one pass, no N+1).
+  function visiblePages(userId, wsId) {
+    const all = db.all('SELECT * FROM pages WHERE workspace_id = ? AND deleted_at IS NULL ORDER BY position', wsId);
+    const byId = new Map(all.map((p) => [p.id, p]));
+    const shares = new Map(db.all('SELECT s.page_id, s.role FROM page_shares s JOIN pages p ON p.id = s.page_id WHERE s.user_id = ? AND p.workspace_id = ?', userId, wsId).map((r) => [r.page_id, r.role]));
+    const shared = new Set(db.all('SELECT DISTINCT s.page_id FROM page_shares s JOIN pages p ON p.id = s.page_id WHERE p.workspace_id = ?', wsId).map((r) => r.page_id));
+    const wsRole = roleIn(userId, wsId);
+    const out = [];
+    for (const p of all) {
+      const chain = chainOf(p, (id) => byId.get(id));
+      const role = accessFor(userId, p, { chain, wsRole, shares });
+      if (role) out.push({ page: p, role, restricted: chain.some((x) => x.access === 'restricted'), shared: shared.has(p.id) });
+    }
+    return out;
+  }
+
   const memberIds = (wsId) => db.all('SELECT user_id FROM members WHERE workspace_id = ?', wsId).map((r) => r.user_id);
-  const broadcast = (wsId, event) => sendTo(memberIds(wsId), { workspaceId: wsId, ...event });
+  const shareUserIds = (wsId) => db.all('SELECT DISTINCT s.user_id FROM page_shares s JOIN pages p ON p.id = s.page_id WHERE p.workspace_id = ?', wsId).map((r) => r.user_id);
+  // events carry ids only, so members and people with shared pages can all be told to refresh
+  const broadcast = (wsId, event) => sendTo([...memberIds(wsId), ...shareUserIds(wsId)], { workspaceId: wsId, ...event });
 
   const pagePublic = (p) => ({
     id: p.id, workspaceId: p.workspace_id, parentId: p.parent_id, title: p.title, position: p.position,
     createdAt: p.created_at, createdBy: p.created_by, updatedAt: p.updated_at, updatedBy: p.updated_by, deletedAt: p.deleted_at,
+    access: p.access || 'workspace',
   });
 
   function createSession(user) {
@@ -137,8 +187,8 @@ export function createApi({ db, config, collab }) {
 
   // ---------------------------------------------------------------- links
   const WIKI = /\[\[([^\]\n|#]+)(?:#[^\]\n|]*)?(?:\|[^\]\n]*)?\]\]/g;
-  function linkIndex(wsId) {
-    const pages = db.all('SELECT id, title, parent_id, markdown, updated_at FROM pages WHERE workspace_id = ? AND deleted_at IS NULL', wsId);
+  function linkIndex(wsId, userId) {
+    const pages = visiblePages(userId, wsId).map((v) => v.page);
     const byTitle = new Map();
     for (const p of pages) if (!byTitle.has(p.title.toLowerCase())) byTitle.set(p.title.toLowerCase(), p.id);
     const links = new Map();
@@ -188,8 +238,13 @@ export function createApi({ db, config, collab }) {
   }
 
   function mentionTargets(page, mentions) {
-    const members = new Set(memberIds(page.workspace_id));
-    return (Array.isArray(mentions) ? mentions : []).filter((id) => members.has(id));
+    return (Array.isArray(mentions) ? mentions : []).filter((id) => typeof id === 'string' && accessFor(id, page));
+  }
+  // Everyone who can open this page: for @mentions, avatars and the share dialog.
+  function pagePeople(page) {
+    const chain = chainOf(page);
+    const ids = new Set([...memberIds(page.workspace_id), ...db.all(`SELECT user_id FROM page_shares WHERE page_id IN (${chain.map(() => '?').join(',')})`, ...chain.map((p) => p.id)).map((r) => r.user_id)]);
+    return [...ids].map((id) => ({ user: userById(id), role: accessFor(id, page, { chain }) })).filter((x) => x.user && x.role);
   }
 
   // ---------------------------------------------------------------- routes
@@ -359,7 +414,7 @@ export function createApi({ db, config, collab }) {
   // pages
   route('GET', '/api/workspaces/:id/pages', ({ user, params }) => {
     const role = requireRole(user, params.id);
-    const pages = db.all('SELECT * FROM pages WHERE workspace_id = ? AND deleted_at IS NULL ORDER BY position', params.id).map(pagePublic);
+    const pages = visiblePages(user.id, params.id).map((v) => ({ ...pagePublic(v.page), role: v.role, restricted: v.restricted, shared: v.shared }));
     return { role, pages };
   });
   route('POST', '/api/workspaces/:id/pages', ({ user, params, body }) => {
@@ -458,18 +513,19 @@ export function createApi({ db, config, collab }) {
   // links, graph, search
   route('GET', '/api/pages/:id/links', ({ user, params }) => {
     const { page } = pageFor(user, params.id);
-    const { pages, links } = linkIndex(page.workspace_id);
+    const { pages, links } = linkIndex(page.workspace_id, user.id);
     const linked = [];
     for (const p of pages) {
       if (p.id === page.id) continue;
       const hits = links.get(p.id).filter((l) => l.to === page.id);
       if (hits.length) linked.push({ id: p.id, title: p.title, snippets: [...new Set(hits.slice(0, 3).map((h) => snippet(p.markdown, h.index)))] });
     }
-    return { linked, children: db.all('SELECT id, title FROM pages WHERE parent_id = ? AND deleted_at IS NULL ORDER BY position', page.id) };
+    const children = db.all('SELECT * FROM pages WHERE parent_id = ? AND deleted_at IS NULL ORDER BY position', page.id).filter((c) => accessFor(user.id, c)).map((c) => ({ id: c.id, title: c.title }));
+    return { linked, children };
   });
   route('GET', '/api/workspaces/:id/graph', ({ user, params }) => {
     requireRole(user, params.id);
-    const { pages, links } = linkIndex(params.id);
+    const { pages, links } = linkIndex(params.id, user.id);
     const byId = new Map(pages.map((p) => [p.id, p]));
     const top = (p) => { let c = p; while (c.parent_id && byId.get(c.parent_id)) c = byId.get(c.parent_id); return c === p ? '' : c.title; };
     const nodes = pages.map((p) => ({ id: p.id, name: p.title, folder: top(p), mtime: p.updated_at / 1000 }));
@@ -494,7 +550,7 @@ export function createApi({ db, config, collab }) {
     const q = String(query.q || '').toLowerCase().trim();
     if (!q) return { results: [] };
     const results = [];
-    for (const p of db.all('SELECT id, title, markdown, updated_at FROM pages WHERE workspace_id = ? AND deleted_at IS NULL', params.id)) {
+    for (const p of visiblePages(user.id, params.id).map((v) => v.page)) {
       const t = p.title.toLowerCase();
       const i = p.markdown.toLowerCase().indexOf(q);
       if (!t.includes(q) && i < 0) continue;
@@ -566,6 +622,10 @@ export function createApi({ db, config, collab }) {
   });
 
   // people lookup for @mentions and avatars
+  route('GET', '/api/pages/:id/people', ({ user, params }) => {
+    const { page } = pageFor(user, params.id);
+    return { people: pagePeople(page).map(({ user: u }) => ({ id: u.id, name: u.name, color: u.color })).sort((a, b) => a.name.localeCompare(b.name)) };
+  });
   route('GET', '/api/workspaces/:id/people', ({ user, params }) => {
     requireRole(user, params.id);
     return { people: db.all('SELECT u.id, u.name, u.color FROM members m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = ? ORDER BY u.name', params.id) };
@@ -582,6 +642,162 @@ export function createApi({ db, config, collab }) {
     if (Array.isArray(body.ids)) for (const id of body.ids) db.run('UPDATE notifications SET read_at = ? WHERE id = ? AND user_id = ?', now(), Number(id), user.id);
     else db.run('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL', now(), user.id);
     return { ok: true };
+  });
+
+  // ---------------------------------------------------------------- people, teams & sharing
+  route('GET', '/api/users', ({ query }) => {
+    const q = `%${String(query.q || '').trim().toLowerCase()}%`;
+    return { users: db.all('SELECT id, name, email, color FROM users WHERE lower(name) LIKE ? OR lower(email) LIKE ? ORDER BY name LIMIT 20', q, q) };
+  });
+
+  route('POST', '/api/workspaces/:id/members', ({ user, params, body }) => {
+    requireRole(user, params.id, 'owner');
+    const ws = db.get('SELECT * FROM workspaces WHERE id = ?', params.id);
+    if (ws.kind === 'private') fail(400, 'Private spaces can’t have members. Share individual pages instead.');
+    const target = userById(String(body.userId || ''));
+    if (!target) fail(404, 'Person not found');
+    const role = ROLES.includes(body.role) ? body.role : 'editor';
+    if (roleIn(target.id, ws.id)) db.run('UPDATE members SET role = ? WHERE workspace_id = ? AND user_id = ?', role, ws.id, target.id);
+    else {
+      db.run('INSERT INTO members (workspace_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)', ws.id, target.id, role, now());
+      notify([target.id], { kind: 'added', workspaceId: ws.id, actorId: user.id, text: `${user.name} added you to ${ws.name}` });
+    }
+    sendTo([target.id], { type: 'workspace', workspaceId: ws.id });
+    broadcast(ws.id, { type: 'members' });
+    return { ok: true };
+  });
+
+  const nearestShares = (chain) => {
+    const map = new Map();
+    for (const p of chain) {
+      for (const r of db.all('SELECT user_id, role FROM page_shares WHERE page_id = ?', p.id)) if (!map.has(r.user_id)) map.set(r.user_id, { role: r.role, pageId: p.id, title: p.title });
+    }
+    return map;
+  };
+
+  route('GET', '/api/pages/:id/access', ({ user, params }) => {
+    const { page, role } = pageFor(user, params.id);
+    const chain = chainOf(page);
+    const ws = db.get('SELECT id, name, kind FROM workspaces WHERE id = ?', page.workspace_id);
+    const restrictedBy = chain.find((p) => p.access === 'restricted');
+    const shares = nearestShares(chain);
+    const people = pagePeople(page).map(({ user: u, role: r }) => {
+      const s = shares.get(u.id);
+      const wsRole = roleIn(u.id, page.workspace_id);
+      return {
+        id: u.id, name: u.name, email: u.email, color: u.color, role: r,
+        via: s ? 'share' : wsRole === 'owner' ? 'owner' : 'member',
+        inheritedFrom: s && s.pageId !== page.id ? s.title : null,
+        removable: !!s && s.pageId === page.id,
+      };
+    }).sort((a, b) => (RANK[b.role] - RANK[a.role]) || a.name.localeCompare(b.name));
+    return {
+      mode: page.access || 'workspace',
+      restrictedBy: restrictedBy && restrictedBy.id !== page.id ? { id: restrictedBy.id, title: restrictedBy.title } : null,
+      workspace: { id: ws.id, name: ws.name, kind: ws.kind, members: memberIds(ws.id).length },
+      canManage: canManage(user.id, page, role),
+      role,
+      people,
+    };
+  });
+
+  function requireManage(user, page) {
+    if (!canManage(user.id, page)) fail(403, 'Only the page’s creator or a workspace owner can change who has access');
+  }
+  const subtree = (page) => [page.id, ...descendants(page.id)];
+
+  route('PUT', '/api/pages/:id/access', ({ user, params, body }) => {
+    const { page } = pageFor(user, params.id);
+    requireManage(user, page);
+    const ws = db.get('SELECT kind FROM workspaces WHERE id = ?', page.workspace_id);
+    if (ws.kind === 'private') fail(400, 'Pages in your private space are already private. Share them with people instead.');
+    const mode = body.mode === 'restricted' ? 'restricted' : 'workspace';
+    db.run('UPDATE pages SET access = ? WHERE id = ?', mode, page.id);
+    collab.reset(subtree(page));
+    broadcast(page.workspace_id, { type: 'tree', actorId: user.id });
+    return { ok: true, mode };
+  });
+
+  route('POST', '/api/pages/:id/shares', ({ user, params, body }) => {
+    const { page } = pageFor(user, params.id);
+    requireManage(user, page);
+    const target = userById(String(body.userId || ''));
+    if (!target) fail(404, 'Person not found');
+    if (target.id === user.id) fail(400, 'You already have access');
+    const role = body.role === 'viewer' ? 'viewer' : 'editor';
+    const existed = db.get('SELECT 1 AS x FROM page_shares WHERE page_id = ? AND user_id = ?', page.id, target.id);
+    db.run('INSERT INTO page_shares (page_id, user_id, role, created_by, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(page_id, user_id) DO UPDATE SET role = excluded.role', page.id, target.id, role, user.id, now());
+    if (!existed) notify([target.id], { kind: 'shared', workspaceId: page.workspace_id, pageId: page.id, actorId: user.id, text: `${user.name} shared “${page.title}” with you` });
+    sendTo([target.id], { type: 'shared' });
+    collab.reset(subtree(page));
+    broadcast(page.workspace_id, { type: 'tree', actorId: user.id });
+    return { ok: true };
+  });
+
+  route('PATCH', '/api/pages/:id/shares/:uid', ({ user, params, body }) => {
+    const { page } = pageFor(user, params.id);
+    requireManage(user, page);
+    db.run('UPDATE page_shares SET role = ? WHERE page_id = ? AND user_id = ?', body.role === 'viewer' ? 'viewer' : 'editor', page.id, params.uid);
+    collab.reset(subtree(page));
+    sendTo([params.uid], { type: 'shared' });
+    return { ok: true };
+  });
+
+  route('DELETE', '/api/pages/:id/shares/:uid', ({ user, params }) => {
+    const { page } = pageFor(user, params.id);
+    if (params.uid !== user.id) requireManage(user, page);
+    db.run('DELETE FROM page_shares WHERE page_id = ? AND user_id = ?', page.id, params.uid);
+    collab.reset(subtree(page));
+    sendTo([params.uid], { type: 'shared' });
+    broadcast(page.workspace_id, { type: 'tree', actorId: user.id });
+    return { ok: true };
+  });
+
+  // Pages shared with this person that they don't already see through their own workspaces.
+  function sharedWithMe(user) {
+    const out = new Map();
+    const rows = db.all('SELECT s.page_id, s.created_by FROM page_shares s JOIN pages p ON p.id = s.page_id WHERE s.user_id = ? AND p.deleted_at IS NULL ORDER BY s.created_at DESC', user.id);
+    for (const r of rows) {
+      const root = pageById(r.page_id);
+      if (roleIn(user.id, root.workspace_id)) continue; // already in their sidebar under that workspace
+      const walk = (p, isRoot) => {
+        if (out.has(p.id)) return;
+        const role = accessFor(user.id, p);
+        if (!role) return;
+        out.set(p.id, { page: p, role, root: isRoot, sharedBy: r.created_by });
+        for (const c of db.all('SELECT * FROM pages WHERE parent_id = ? AND deleted_at IS NULL ORDER BY position', p.id)) walk(c, false);
+      };
+      walk(root, true);
+    }
+    for (const v of out.values()) if (v.root && v.page.parent_id && out.has(v.page.parent_id)) v.root = false;
+    return [...out.values()];
+  }
+
+  route('GET', '/api/shared', ({ user }) => ({
+    pages: sharedWithMe(user).map((v) => ({
+      ...pagePublic(v.page), role: v.role, root: v.root,
+      workspaceName: db.get('SELECT name FROM workspaces WHERE id = ?', v.page.workspace_id)?.name,
+      sharedBy: userById(v.sharedBy)?.name || null,
+    })),
+  }));
+
+  route('POST', '/api/pages/:id/move', ({ user, params, body }) => {
+    const { page } = pageFor(user, params.id, 'editor');
+    const target = String(body.workspaceId || '');
+    requireRole(user, target, 'editor');
+    if (target === page.workspace_id) return { ok: true };
+    const from = page.workspace_id;
+    const ids = subtree(page);
+    const pos = (db.get('SELECT MAX(position) AS m FROM pages WHERE workspace_id = ? AND parent_id IS NULL', target)?.m ?? 0) + 1;
+    db.tx(() => {
+      for (const id of ids) db.run('UPDATE pages SET workspace_id = ?, updated_at = ? WHERE id = ?', target, now(), id);
+      db.run('UPDATE pages SET parent_id = NULL, position = ? WHERE id = ?', pos, page.id);
+    });
+    mirrorTree(page.id);
+    collab.reset(ids);
+    broadcast(from, { type: 'tree', actorId: user.id, deleted: ids });
+    broadcast(target, { type: 'tree', actorId: user.id });
+    return { ok: true, page: pagePublic(pageById(page.id)) };
   });
 
   route('GET', '/api/events', ({ user, res }) => { subscribe(user.id, res); return undefined; }, { stream: true });
@@ -641,8 +857,12 @@ export function createApi({ db, config, collab }) {
   route('POST', '/api/ai/ask', ({ user, body, res }) => {
     aiAllowed(user);
     // only pages from workspaces this person belongs to (their private space included)
-    const docs = db.all(`SELECT p.id, p.title, p.markdown AS text, w.kind, w.name AS ws FROM pages p JOIN members m ON m.workspace_id = p.workspace_id AND m.user_id = ?
-      JOIN workspaces w ON w.id = p.workspace_id WHERE p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT 3000`, user.id);
+    const docs = [];
+    for (const w of db.all('SELECT workspace_id AS id FROM members WHERE user_id = ?', user.id)) {
+      for (const v of visiblePages(user.id, w.id)) docs.push({ id: v.page.id, title: v.page.title, text: v.page.markdown, updatedAt: v.page.updated_at });
+    }
+    for (const sp of sharedWithMe(user)) docs.push({ id: sp.page.id, title: sp.page.title, text: sp.page.markdown, updatedAt: sp.page.updated_at });
+    docs.sort((a, b) => b.updatedAt - a.updatedAt).splice(3000);
     const picked = aiLib.pickNotes(String(body.question || ''), docs, { currentId: body.currentPath || null });
     const history = (Array.isArray(body.history) ? body.history : []).slice(-8).filter((m) => m && ['user', 'assistant'].includes(m.role) && typeof m.content === 'string');
     return streamAI(res, (signal) => aiClient.stream(aiSettings(), {
@@ -669,7 +889,7 @@ export function createApi({ db, config, collab }) {
     return false;
   }
 
-  return { handle, userForToken, roleIn, mirror, broadcast, db };
+  return { handle, userForToken, roleIn, pageRole, mirror, broadcast, db };
 }
 
 function readJson(req) {

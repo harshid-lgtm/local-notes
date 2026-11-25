@@ -60,12 +60,22 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS notif_user ON notifications(user_id, read_at);
 CREATE TABLE IF NOT EXISTS settings ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
+CREATE TABLE IF NOT EXISTS page_shares (
+  page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL,
+  PRIMARY KEY (page_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS shares_user ON page_shares(user_id);
 `;
 
 export function openDb(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'team.db'));
   db.exec(SCHEMA);
+  // migrations for databases created by earlier versions
+  const cols = db.prepare('PRAGMA table_info(pages)').all().map((c) => c.name);
+  if (!cols.includes('access')) db.exec("ALTER TABLE pages ADD COLUMN access TEXT NOT NULL DEFAULT 'workspace'");
   const cache = new Map();
   const prep = (sql) => {
     if (!cache.has(sql)) cache.set(sql, db.prepare(sql));

@@ -11,17 +11,38 @@ The first person to sign up on a new server becomes its admin. After that, peopl
 
 ## Private and shared
 
-The sidebar shows **Private** — pages only you can see — and each team workspace you belong to. Everyone in a workspace can see all of its pages.
+The sidebar shows **Private** — pages only you can see unless you share them — then **Shared with me**, then each team workspace you belong to. Workspace members see every page in it, except pages set to *Only people invited*.
+
+You can belong to as many workspaces as you like, so a company can have one per team (Engineering, Sales, Leadership…). Create one with **New workspace** at the bottom of the sidebar.
 
 | Role | Can |
 | --- | --- |
-| Owner | Everything, plus invite people, change roles, rename or delete the workspace |
+| Owner | Everything, plus add or remove people, change roles, rename or delete the workspace |
 | Editor | Create, edit, move and delete pages; comment |
 | Viewer | Read pages and comments |
 
-## Invite people
+## Add people to a workspace
 
-Click **Share** on a page (or **Share & members** in a workspace's `•••` menu), choose **Can edit** or **Can view**, and **Create link**. Links work for 14 days. Owners can change roles or remove people from the same dialog.
+Open a workspace's `•••` menu → **Share & members**. Workspace owners can:
+
+- **Add people already on this server**: type a name or email, pick a role and click **Add**. They're notified and the workspace appears in their sidebar straight away.
+- **Invite with a link** for people who don't have an account yet. Links work for 14 days.
+- Change anyone's role, or remove them with **×**. Removing someone disconnects them from the workspace's pages immediately.
+
+## Share a page with selected people
+
+Click **Share** at the top of any page — including pages in your private space.
+
+- **Invite people**: type a name or email, choose **Can edit** or **Can view**, and click **Invite**. You can pick several people at once. They're notified, and the page (with its subpages) appears under **Shared with me** in their sidebar if they aren't in that workspace.
+- **Change or remove access**: use the role menu or **×** next to a person. Changes apply live — someone viewing the page is switched to read-only or taken off it.
+- **General access** (team pages only): choose **Everyone in *workspace*** or **Only people invited**. Restricted pages, and their subpages, are hidden from everyone else in the workspace — including the sidebar, search, links, graph and Ask AI. A lock appears next to them in the sidebar.
+- Subpages inherit access from their parent; the dialog shows where someone's access comes from.
+
+The page's creator and workspace owners can change who has access. Anyone a page is shared with can remove themselves from the same dialog.
+
+## Move pages between workspaces
+
+Use a page's `•••` menu → **Move to…** to move it (and its subpages) to another workspace or to your private space — for example, to share a private draft with the team. History and comments move with it.
 
 ## Edit together
 
@@ -33,7 +54,7 @@ Select text and click **Comment** (`Ctrl Alt M`). Type `@` to mention someone �
 
 ## Inbox
 
-Mentions and replies arrive in **Inbox** with a badge. Click one to jump straight to the comment.
+Mentions, replies, pages shared with you and workspaces you're added to arrive in **Inbox** with a badge. Click one to jump straight to the comment.
 
 ## Version history
 

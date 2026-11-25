@@ -30,11 +30,26 @@ const collab = {
   kick(userId, workspaceId) {
     for (const doc of server?.hocuspocus.documents.values() || []) {
       for (const conn of doc.getConnections()) {
-        if (conn.context?.user?.id === userId && conn.context?.workspaceId === workspaceId) conn.close();
+        if (conn.context?.user?.id === userId && conn.context?.workspaceId === workspaceId) recheck(conn);
       }
     }
   },
+  // Access to these pages changed: re-check everyone connected. People who lost access are
+  // disconnected; everyone else stays connected with their (possibly new) read/write permission.
+  reset(pageIds) {
+    for (const id of pageIds) {
+      const doc = server?.hocuspocus.documents.get(`page:${id}`);
+      for (const conn of doc?.getConnections() || []) recheck(conn);
+    }
+  },
 };
+function recheck(conn) {
+  const ctx = conn.context || {};
+  const role = ctx.user && ctx.pageId ? api.pageRole(ctx.user.id, ctx.pageId) : null;
+  if (!role) { conn.close(); return; }
+  ctx.role = role;
+  conn.readOnly = role === 'viewer';
+}
 const api = createApi({ db, config, collab });
 
 const MIME = {
@@ -72,7 +87,7 @@ server = new Server({
     const pageId = documentName.replace(/^page:/, '');
     const page = db.get('SELECT id, workspace_id, deleted_at FROM pages WHERE id = ?', pageId);
     if (!page || page.deleted_at) throw new Error('Page not found');
-    const role = api.roleIn(user.id, page.workspace_id);
+    const role = api.pageRole(user.id, page.id);
     if (!role) throw new Error('No access');
     if (role === 'viewer') connectionConfig.readOnly = true;
     return { user: { id: user.id, name: user.name, color: user.color }, pageId, workspaceId: page.workspace_id, role };

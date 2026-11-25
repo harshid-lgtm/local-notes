@@ -148,7 +148,7 @@ export async function startTeam(conn, { hosted = false, onExit = null } = {}) {
   });
   host.aiWrite = () => T?.current && openWritePanel(T.current.editor);
   buildShell();
-  await Promise.all(T.workspaces.map((w) => loadPages(w.id)));
+  await Promise.all([...T.workspaces.map((w) => loadPages(w.id)), loadShared()]);
   renderSidebar();
   listen();
   const route = location.hash.match(/^#\/p\/([\w-]+)/);
@@ -210,6 +210,11 @@ function restoreHost() { if (savedHost) Object.assign(host, savedHost); }
 const findPage = (id) => { for (const list of T.pages.values()) { const p = list.find((x) => x.id === id); if (p) return p; } return null; };
 const wsById = (id) => T.workspaces.find((w) => w.id === id);
 const canEdit = (wsId) => ['owner', 'editor'].includes(wsById(wsId)?.role);
+const SHARED = 'shared'; // sidebar section for pages people shared with you from workspaces you're not in
+const canEditPage = (p) => !!p && (p.role ? p.role !== 'viewer' : canEdit(p.workspaceId));
+const sectionOf = (p) => (p && !wsById(p.workspaceId) ? SHARED : p?.workspaceId);
+// Reload whichever sidebar list holds this workspace's pages.
+const refreshWs = (wsId) => (wsById(wsId) ? loadPages(wsId) : loadShared());
 function pageByTitle(title) {
   const ws = T.current?.page.workspaceId;
   const t = String(title).trim().toLowerCase();
@@ -225,18 +230,23 @@ async function loadPages(wsId) {
   T.pages.set(wsId, r.pages);
   T.roles.set(wsId, r.role);
 }
-async function loadPeople(wsId) {
-  if (!T.people.has(wsId)) T.people.set(wsId, (await T.api.get(`/api/workspaces/${wsId}/people`)).people);
-  return T.people.get(wsId);
+async function loadShared() {
+  try { T.pages.set(SHARED, (await T.api.get('/api/shared')).pages); } catch { T.pages.set(SHARED, []); }
+}
+// Everyone who can open a page (for avatars, @mentions and history), cached per page.
+async function loadPeople(pageId) {
+  if (!T.people.has(pageId)) T.people.set(pageId, (await T.api.get(`/api/pages/${pageId}/people`)).people);
+  return T.people.get(pageId);
 }
 async function reloadMe() {
   const me = await T.api.get('/api/me');
   T.me = me.user;
   T.workspaces = me.workspaces;
   T.unread = me.unread;
-  for (const id of [...T.pages.keys()]) if (!wsById(id)) T.pages.delete(id);
-  await Promise.all(T.workspaces.filter((w) => !T.pages.has(w.id)).map((w) => loadPages(w.id)));
+  for (const id of [...T.pages.keys()]) if (id !== SHARED && !wsById(id)) T.pages.delete(id);
+  await Promise.all([...T.workspaces.filter((w) => !T.pages.has(w.id)).map((w) => loadPages(w.id)), loadShared()]);
   renderSidebar();
+  checkCurrent();
 }
 
 // live updates from the server
@@ -248,10 +258,12 @@ function listen() {
     if (!T) return;
     let ev;
     try { ev = JSON.parse(msg.data); } catch { return; }
-    if (ev.type === 'tree') {
-      await loadPages(ev.workspaceId);
+    if (ev.type === 'tree' || ev.type === 'shared') {
+      if (ev.type === 'tree' && wsById(ev.workspaceId)) await loadPages(ev.workspaceId);
+      await loadShared();
+      T.people.clear();
       renderSidebar();
-      if (T.current && !findPage(T.current.page.id)) { toast('This page was moved to trash'); showHome(); return; }
+      if (checkCurrent()) return;
       if (T.current) syncCurrentMeta();
       if (!$('#t-home').hidden) renderHome();
     } else if (ev.type === 'page' && T.current?.page.id === ev.pageId) {
@@ -266,10 +278,20 @@ function listen() {
       if (T.drawer === 'inbox') renderInbox();
       toast('You have a new notification', { kind: 'info' });
     } else if (ev.type === 'members' || ev.type === 'workspace') {
-      T.people.delete(ev.workspaceId);
+      T.people.clear();
       await reloadMe();
     }
   };
+}
+
+// After access changes: leave a page you can no longer open, and reopen one whose role changed.
+function checkCurrent() {
+  const c = T?.current;
+  if (!c) return false;
+  const p = findPage(c.page.id);
+  if (!p) { toast('This page was moved, deleted, or you no longer have access'); showHome(); return true; }
+  if (p.role && p.role !== c.role) { openPage(p.id, { replace: true }); return true; }
+  return false;
 }
 
 // ================================================================== shell
@@ -343,7 +365,7 @@ function buildShell() {
   $('#t-account', T.root).onclick = (e) => accountMenu(e.currentTarget);
   $('#t-collapse', T.root).onclick = () => document.body.classList.add('sidebar-collapsed');
   $('#t-expand', T.root).onclick = () => document.body.classList.remove('sidebar-collapsed');
-  $('#t-share', T.root).onclick = () => T.current && shareDialog(T.current.page.workspaceId);
+  $('#t-share', T.root).onclick = () => T.current && pageShareDialog(T.current.page.id);
   $('#t-comments', T.root).onclick = () => toggleDrawer('comments');
   $('#t-history', T.root).onclick = () => toggleDrawer('history');
   $('#t-more', T.root).onclick = (e) => pageMenu(e.currentTarget);
@@ -420,7 +442,9 @@ function wireKeys() {
 
 // ================================================================== sidebar
 function childrenOf(wsId, parentId) {
-  return (T.pages.get(wsId) || []).filter((p) => (p.parentId || null) === parentId).sort((a, b) => a.position - b.position);
+  const list = T.pages.get(wsId) || [];
+  if (wsId === SHARED) return parentId ? list.filter((p) => !p.root && p.parentId === parentId).sort((a, b) => a.position - b.position) : list.filter((p) => p.root);
+  return list.filter((p) => (p.parentId || null) === parentId).sort((a, b) => a.position - b.position);
 }
 
 function treeRows(wsId, parentId, depth) {
@@ -428,13 +452,17 @@ function treeRows(wsId, parentId, depth) {
     const kids = childrenOf(wsId, p.id);
     const open = T.expanded.has(p.id);
     const active = T.current?.page.id === p.id;
-    let html = `<div class="row note ${kids.length ? 'has-sub' : ''} ${open ? 'open' : ''} ${active ? 'active' : ''}" data-page="${p.id}" data-ws="${wsId}" draggable="${canEdit(wsId)}" style="--depth:${depth}">
+    const edit = canEditPage(p);
+    const badge = p.access === 'restricted' ? `<span class="row-badge" title="Only invited people can see this page">${icon('lock', 12)}</span>`
+      : p.shared ? `<span class="row-badge" title="Shared with people outside this workspace">${icon('users', 12)}</span>`
+        : wsId === SHARED && depth === 0 && p.workspaceName ? `<span class="row-from" title="From ${esc(p.workspaceName)}${p.sharedBy ? `, shared by ${esc(p.sharedBy)}` : ''}">${esc(p.sharedBy || p.workspaceName)}</span>` : '';
+    let html = `<div class="row note ${kids.length ? 'has-sub' : ''} ${open ? 'open' : ''} ${active ? 'active' : ''}" data-page="${p.id}" data-ws="${wsId}" draggable="${wsId !== SHARED && edit}" style="--depth:${depth}">
       <span class="twisty">${kids.length ? icon('chevron-right', 14, 2) : ''}</span>
       <span class="row-icon">${icon(kids.length ? 'book' : 'page', 16)}</span>
-      <span class="row-label">${esc(p.title || 'Untitled')}</span>
+      <span class="row-label">${esc(p.title || 'Untitled')}</span>${badge}
       <span class="row-actions">
         <button class="row-btn" data-act="more" title="More">${icon('more', 15)}</button>
-        ${canEdit(wsId) ? `<button class="row-btn" data-act="add" title="Add a subpage">${icon('plus', 15)}</button>` : ''}
+        ${edit ? `<button class="row-btn" data-act="add" title="Add a subpage">${icon('plus', 15)}</button>` : ''}
       </span></div>`;
     if (kids.length && open) html += `<div class="children">${treeRows(wsId, p.id, depth + 1)}</div>`;
     return html;
@@ -443,7 +471,15 @@ function treeRows(wsId, parentId, depth) {
 
 function renderSidebar() {
   const el = $('#t-tree', T.root);
-  el.innerHTML = T.workspaces.map((w) => {
+  const shared = (T.pages.get(SHARED) || []).length ? `<section class="ws-sec ${T.collapsedWs.has(SHARED) ? 'collapsed' : ''}" data-ws="${SHARED}">
+      <div class="sb-label ws-head" data-ws-head="${SHARED}">
+        <span class="ws-chev">${icon('chevron-right', 12, 2.2)}</span>
+        <span class="ws-name">Shared with me</span>
+        <span class="ws-lock" title="Pages people shared with you directly">${icon('users', 13)}</span>
+      </div>
+      <div class="ws-tree tree" data-ws-tree="${SHARED}">${treeRows(SHARED, null, 0)}</div>
+    </section>` : '';
+  el.innerHTML = T.workspaces.map((w, i) => (i === 1 ? shared : '') + (() => {
     const collapsed = T.collapsedWs.has(w.id);
     const rows = treeRows(w.id, null, 0);
     return `<section class="ws-sec ${collapsed ? 'collapsed' : ''}" data-ws="${w.id}">
@@ -458,7 +494,7 @@ function renderSidebar() {
       </div>
       <div class="ws-tree tree" data-ws-tree="${w.id}">${rows || `<div class="tree-empty">${canEdit(w.id) ? `No pages yet. <button class="link-btn" data-ws-act="add">Add a page</button>` : 'No pages yet.'}</div>`}</div>
     </section>`;
-  }).join('');
+  })()).join('') + (T.workspaces.length < 2 ? shared : '');
 }
 
 function wireTree() {
@@ -486,7 +522,7 @@ function wireTree() {
     const btn = e.target.closest('.row-btn');
     if (btn) {
       e.stopPropagation();
-      if (btn.dataset.act === 'add') { T.expanded.add(row.dataset.page); createPage(row.dataset.ws, row.dataset.page); }
+      if (btn.dataset.act === 'add') { T.expanded.add(row.dataset.page); createPage(findPage(row.dataset.page)?.workspaceId, row.dataset.page); }
       else rowMenu(row.dataset.page, btn);
       return;
     }
@@ -628,9 +664,11 @@ function workspaceMenu(wsId, anchor) {
 function rowMenu(pageId, anchor) {
   const p = findPage(pageId);
   if (!p) return;
-  const edit = canEdit(p.workspaceId);
+  const edit = canEditPage(p);
   showMenu([
     ...(edit ? [{ label: 'Add subpage', icon: 'file-plus', run: () => { T.expanded.add(p.id); createPage(p.workspaceId, p.id); } }] : []),
+    { label: 'Share…', icon: 'user-plus', run: () => pageShareDialog(p.id) },
+    ...(edit && moveTargets(p).length ? [{ label: 'Move to…', icon: 'move', run: () => moveMenu(p.id, anchor) }] : []),
     { label: 'Copy link', icon: 'link', run: () => copyLink(p.id) },
     { label: 'Copy as wikilink', icon: 'page-link', run: () => copy(`[[${p.title}]]`, 'Wikilink copied') },
     ...(edit ? ['sep', { label: 'Move to trash', icon: 'trash', danger: true, run: () => deletePage(p.id) }] : []),
@@ -701,12 +739,12 @@ async function shareDialog(wsId) {
   const ws = wsById(wsId);
   if (!ws) return;
   if (ws.kind === 'private') {
-    toast('Pages in your private space are only visible to you. Move a page to a team workspace to share it.');
+    toast('Your private space is just for you. Use Share on a page to invite people to it.');
     return;
   }
   const owner = ws.role === 'owner';
   const box = h(`<div class="share">
-    <div class="share-head"><div><h2>Share “${esc(ws.name)}”</h2><p>Everyone here can see every page in this workspace.</p></div>
+    <div class="share-head"><div><h2>Share “${esc(ws.name)}”</h2><p>Members can see every page here except ones set to “Only people invited”. To share a single page, use Share on that page.</p></div>
       <button class="icon-btn" data-close>${icon('x', 18)}</button></div>
     ${owner ? `<div class="share-invite">
       <div class="share-row"><span class="share-ic">${icon('link', 17)}</span><div class="share-copy"><strong>Invite with a link</strong><span>Anyone with the link can join for 14 days.</span></div>
@@ -714,9 +752,23 @@ async function shareDialog(wsId) {
         <button class="btn primary small" data-invite>Create link</button></div>
       <div class="share-link" hidden><input readonly><button class="btn ghost small" data-copy>${icon('copy', 15)}<span>Copy</span></button></div>
     </div>` : ''}
+    <div class="ws-picker"></div>
     <div class="share-members"><div class="pk-label">Members</div><div class="share-list">Loading…</div></div>
   </div>`);
   const m = openModal(box, { className: 'share-modal' });
+  let memberIds = new Set();
+  if (owner) {
+    $('.ws-picker', box).append(h('<div class="pk-label">Add people already on this server</div>'), peoplePicker({
+      roles: ['editor', 'viewer', 'owner'],
+      button: 'Add',
+      exclude: () => memberIds,
+      onAdd: async (users, role) => {
+        for (const u of users) await T.api.post(`/api/workspaces/${wsId}/members`, { userId: u.id, role });
+        toast(users.length === 1 ? `${users[0].name} added to ${ws.name}` : `${users.length} people added to ${ws.name}`, { kind: 'success' });
+        renderMembers();
+      },
+    }));
+  }
   $('[data-close]', box).onclick = () => m.close();
   $('[data-invite]', box)?.addEventListener('click', async () => {
     try {
@@ -730,6 +782,7 @@ async function shareDialog(wsId) {
   $('[data-copy]', box)?.addEventListener('click', () => copy($('.share-link input', box).value, 'Invite link copied'));
   const renderMembers = async () => {
     const { members } = await T.api.get(`/api/workspaces/${wsId}/members`);
+    memberIds = new Set(members.map((u) => u.id));
     $('.share-list', box).innerHTML = members.map((u) => `<div class="member" data-user="${u.id}">
       ${avatar(u, 32)}<div class="member-info"><strong>${esc(u.name)}${u.id === T.me.id ? ' <em>(you)</em>' : ''}</strong><span>${esc(u.email)}</span></div>
       ${owner ? `<select data-role>${['owner', 'editor', 'viewer'].map((r) => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
@@ -769,16 +822,240 @@ async function trashDialog(wsId) {
   });
 }
 
+// Search everyone on this server by name or email, choose a role, and add them.
+function peoplePicker({ roles = ['editor', 'viewer'], role = 'editor', button = 'Invite', exclude = () => new Set(), onAdd }) {
+  const el = h(`<div class="pp">
+    <div class="pp-row">
+      <span class="pp-ic">${icon('user-plus', 16)}</span>
+      <input class="pp-input" placeholder="Add people by name or email" autocomplete="off" spellcheck="false">
+      <select class="pp-role">${roles.map((r) => `<option value="${r}" ${r === role ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
+      <button class="btn primary small" data-add disabled>${esc(button)}</button>
+    </div>
+    <div class="pp-chips"></div>
+    <div class="pp-list" hidden></div>
+  </div>`);
+  const input = $('.pp-input', el);
+  const list = $('.pp-list', el);
+  const chips = $('.pp-chips', el);
+  const addBtn = $('[data-add]', el);
+  let picked = new Map();
+  let results = [];
+  let active = 0;
+  let seq = 0;
+  const renderChips = () => {
+    chips.innerHTML = [...picked.values()].map((u) => `<span class="pp-chip" data-user="${u.id}">${avatar(u, 18)}<span>${esc(u.name)}</span><button data-unpick title="Remove">${icon('x', 12, 2.2)}</button></span>`).join('');
+    addBtn.disabled = !picked.size;
+  };
+  const renderList = () => {
+    list.hidden = !results.length && !input.value.trim();
+    list.innerHTML = results.length ? results.map((u, i) => `<button class="pp-item ${i === active ? 'active' : ''}" data-i="${i}">${avatar(u, 26)}<span class="member-info"><strong>${esc(u.name)}</strong><span>${esc(u.email)}</span></span></button>`).join('')
+      : `<div class="pp-empty">No one on this server matches “${esc(input.value.trim())}”. Invite them to a workspace with a link first.</div>`;
+  };
+  const search = async () => {
+    const q = input.value.trim();
+    const n = ++seq;
+    if (!q) { results = []; list.hidden = true; return; }
+    const { users } = await T.api.get(`/api/users?q=${encodeURIComponent(q)}`).catch(() => ({ users: [] }));
+    if (n !== seq) return;
+    const skip = exclude();
+    results = users.filter((u) => u.id !== T.me.id && !skip.has(u.id) && !picked.has(u.id)).slice(0, 8);
+    active = 0;
+    renderList();
+  };
+  const pick = (u) => {
+    if (!u) return;
+    picked.set(u.id, u);
+    input.value = '';
+    results = [];
+    list.hidden = true;
+    renderChips();
+    input.focus();
+  };
+  let t;
+  input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(search, 120); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!results.length) return;
+      e.preventDefault();
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + results.length) % results.length;
+      renderList();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (results.length && !list.hidden) pick(results[active]);
+      else if (picked.size) addBtn.click();
+    } else if (e.key === 'Backspace' && !input.value && picked.size) {
+      picked.delete([...picked.keys()].pop());
+      renderChips();
+    } else if (e.key === 'Escape' && !list.hidden) {
+      e.stopPropagation();
+      list.hidden = true;
+    }
+  });
+  list.addEventListener('mousedown', (e) => { e.preventDefault(); const b = e.target.closest('[data-i]'); if (b) pick(results[+b.dataset.i]); });
+  chips.addEventListener('click', (e) => { const b = e.target.closest('[data-unpick]'); if (b) { picked.delete(b.closest('[data-user]').dataset.user); renderChips(); } });
+  addBtn.addEventListener('click', async () => {
+    if (!picked.size) return;
+    addBtn.disabled = true;
+    const role = $('.pp-role', el).value;
+    try {
+      await onAdd([...picked.values()], role);
+      picked = new Map();
+      renderChips();
+    } catch (e) { toast(e.message, { kind: 'error' }); addBtn.disabled = false; }
+  });
+  el.focus = () => input.focus();
+  return el;
+}
+
+async function pageShareDialog(pageId) {
+  const box = h(`<div class="share page-share">
+    <div class="share-head"><div><h2>Share “<span class="ps-title"></span>”</h2><p class="ps-sub">Loading…</p></div>
+      <button class="icon-btn" data-close>${icon('x', 18)}</button></div>
+    <div class="ps-picker"></div>
+    <div class="share-members"><div class="pk-label">People with access</div><div class="share-list"></div></div>
+    <div class="ps-general"></div>
+    <div class="ps-foot">
+      <button class="btn ghost small" data-copy-link>${icon('link', 15)}<span>Copy link</span></button>
+      <span class="ps-foot-note"></span>
+      <button class="btn ghost small" data-ws-share hidden>${icon('users', 15)}<span></span></button>
+    </div>
+  </div>`);
+  const m = openModal(box, { className: 'share-modal' });
+  $('[data-close]', box).onclick = () => m.close();
+  $('[data-copy-link]', box).onclick = () => copyLink(pageId);
+  let data;
+  const changed = async () => {
+    T.people.delete(pageId);
+    const ws = data?.workspace.id;
+    if (ws) await refreshWs(ws).catch(() => {});
+    renderSidebar();
+    await render();
+  };
+  const render = async () => {
+    try { data = await T.api.get(`/api/pages/${pageId}/access`); } catch (e) { toast(e.message, { kind: 'error' }); m.close(); return; }
+    const page = findPage(pageId) || T.current?.page;
+    $('.ps-title', box).textContent = page?.title || 'Untitled';
+    const ws = data.workspace;
+    const priv = ws.kind === 'private';
+    const restricted = data.mode === 'restricted' || !!data.restrictedBy;
+    $('.ps-sub', box).textContent = priv ? 'In your private space. Only you and people you invite can open it.'
+      : restricted ? 'Only the people below can open this page and its subpages.'
+        : `Everyone in ${ws.name} can open it. Invite others to give them access to just this page.`;
+    // picker
+    const holder = $('.ps-picker', box);
+    if (data.canManage && !holder.firstChild) {
+      holder.append(peoplePicker({
+        exclude: () => new Set(data.people.filter((u) => u.via !== 'member' || restricted).map((u) => u.id)),
+        onAdd: async (users, role) => {
+          for (const u of users) await T.api.post(`/api/pages/${pageId}/shares`, { userId: u.id, role });
+          toast(users.length === 1 ? `Shared with ${users[0].name}` : `Shared with ${users.length} people`, { kind: 'success' });
+          await changed();
+        },
+      }));
+      setTimeout(() => holder.firstChild?.focus(), 40);
+    }
+    // people: invited people, owners, and (for restricted pages) everyone who can still see it.
+    // On open team pages, the rest of the workspace is summarised in one row.
+    const listed = data.people.filter((u) => u.via === 'share' || u.via === 'owner' || restricted || priv);
+    const rest = data.people.length - listed.length;
+    const roleCell = (u) => {
+      if (u.removable && data.canManage) return `<select data-share-role>${['editor', 'viewer'].map((r) => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
+        <button class="icon-btn" data-unshare title="Remove access">${icon('x', 16)}</button>`;
+      if (u.removable && u.id === T.me.id) return `<span class="member-role">${ROLE_LABEL[u.role]}</span><button class="icon-btn" data-unshare title="Remove yourself">${icon('logout', 15)}</button>`;
+      return `<span class="member-role">${ROLE_LABEL[u.role]}</span><span class="member-gap"></span>`;
+    };
+    const why = (u) => u.inheritedFrom ? `Access from “${esc(u.inheritedFrom)}”`
+      : u.via === 'owner' ? (priv ? 'Owner' : `Owner of ${esc(ws.name)}`)
+        : u.via === 'member' ? `Member of ${esc(ws.name)}` : esc(u.email || '');
+    $('.share-list', box).innerHTML = listed.map((u) => `<div class="member" data-user="${u.id}">
+        ${avatar(u, 32)}<div class="member-info"><strong>${esc(u.name)}${u.id === T.me.id ? ' <em>(you)</em>' : ''}</strong><span>${why(u)}</span></div>
+        ${roleCell(u)}</div>`).join('')
+      + (rest > 0 ? `<div class="member everyone"><span class="share-ic">${icon('library', 17)}</span><div class="member-info"><strong>Everyone in ${esc(ws.name)}</strong><span>${rest} more ${rest === 1 ? 'person' : 'people'}</span></div><span class="member-role">From workspace</span><span class="member-gap"></span></div>` : '');
+    // general access
+    const gen = $('.ps-general', box);
+    if (priv) gen.innerHTML = '';
+    else if (data.restrictedBy) {
+      gen.innerHTML = `<div class="pk-label">General access</div><div class="ga-row"><span class="ga-ic restricted">${icon('lock', 17)}</span><div class="member-info"><strong>Only people invited</strong><span>Set on the parent page “${esc(data.restrictedBy.title)}”.</span></div>
+        <button class="btn ghost small" data-open-parent="${data.restrictedBy.id}">Open</button></div>`;
+    } else {
+      gen.innerHTML = `<div class="pk-label">General access</div><div class="ga-row"><span class="ga-ic ${restricted ? 'restricted' : ''}">${icon(restricted ? 'lock' : 'library', 17)}</span>
+        <div class="member-info">${data.canManage ? `<select data-mode><option value="workspace" ${!restricted ? 'selected' : ''}>Everyone in ${esc(ws.name)}</option><option value="restricted" ${restricted ? 'selected' : ''}>Only people invited</option></select>`
+          : `<strong>${restricted ? 'Only people invited' : `Everyone in ${esc(ws.name)}`}</strong>`}
+        <span>${restricted ? 'Hidden from the rest of the workspace, including search and graph.' : `${ws.members} member${ws.members === 1 ? '' : 's'} · their workspace role applies`}</span></div></div>`;
+    }
+    $('.ps-foot-note', box).innerHTML = data.canManage ? '' : 'Only the page’s creator or a workspace owner can change access.';
+    const wsBtn = $('[data-ws-share]', box);
+    wsBtn.hidden = priv || !wsById(ws.id);
+    $('span', wsBtn).textContent = `${ws.name} members`;
+    wsBtn.onclick = () => { m.close(); shareDialog(ws.id); };
+  };
+  box.addEventListener('change', async (e) => {
+    const sel = e.target.closest('[data-share-role]');
+    const mode = e.target.closest('[data-mode]');
+    try {
+      if (sel) { await T.api.patch(`/api/pages/${pageId}/shares/${sel.closest('[data-user]').dataset.user}`, { role: sel.value }); toast('Access updated', { kind: 'success' }); await changed(); }
+      if (mode) {
+        await T.api.put(`/api/pages/${pageId}/access`, { mode: mode.value });
+        toast(mode.value === 'restricted' ? 'Now only invited people can open this page' : 'Everyone in the workspace can open this page', { kind: 'success' });
+        await changed();
+      }
+    } catch (err) { toast(err.message, { kind: 'error' }); render(); }
+  });
+  box.addEventListener('click', async (e) => {
+    const rm = e.target.closest('[data-unshare]');
+    const parent = e.target.closest('[data-open-parent]');
+    if (parent) { m.close(); openPage(parent.dataset.openParent); return; }
+    if (!rm) return;
+    const uid = rm.closest('[data-user]').dataset.user;
+    if (uid === T.me.id && !(await confirmDialog({ title: 'Remove your access?', body: 'You won’t be able to open this page until someone shares it with you again.', confirm: 'Remove', danger: true }))) return;
+    try {
+      await T.api.del(`/api/pages/${pageId}/shares/${uid}`);
+      if (uid === T.me.id) { m.close(); await loadShared(); renderSidebar(); checkCurrent(); return; }
+      await changed();
+    } catch (err) { toast(err.message, { kind: 'error' }); }
+  });
+  await render();
+}
+
+// Workspaces a page can be moved into: ones where you can add pages, other than its own.
+const moveTargets = (p) => T.workspaces.filter((w) => w.id !== p.workspaceId && canEdit(w.id));
+
+function moveMenu(pageId, anchor) {
+  const p = findPage(pageId) || T.current?.page;
+  if (!p) return;
+  showMenu([
+    { header: 'Move to' },
+    ...moveTargets(p).map((w) => ({ label: w.kind === 'private' ? 'Private' : w.name, icon: w.kind === 'private' ? 'lock' : 'library', run: () => movePage(p, w) })),
+  ], anchor);
+}
+
+async function movePage(p, ws) {
+  const kids = childrenOf(sectionOf(p), p.id).length;
+  const into = ws.kind === 'private' ? 'your private space' : `“${ws.name}”`;
+  const body = ws.kind === 'private' ? `${kids ? 'It and its subpages' : 'It'} will be visible only to you and anyone it’s shared with.`
+    : `Everyone in ${ws.name} will be able to see ${kids ? 'it and its subpages' : 'it'}, unless it’s set to “Only people invited”.`;
+  if (!(await confirmDialog({ title: `Move “${p.title}” to ${into}?`, body: `${body} History and comments move with it.`, confirm: 'Move' }))) return;
+  try {
+    await T.api.post(`/api/pages/${p.id}/move`, { workspaceId: ws.id });
+    T.collapsedWs.delete(ws.id);
+    persist();
+    await Promise.all([refreshWs(p.workspaceId), loadPages(ws.id)]);
+    renderSidebar();
+    toast(`Moved to ${ws.kind === 'private' ? 'Private' : ws.name}`, { kind: 'success' });
+    if (T.current && (T.current.page.id === p.id || !findPage(T.current.page.id) || findPage(T.current.page.id).workspaceId !== T.current.page.workspaceId)) openPage(T.current.page.id, { replace: true });
+  } catch (e) { toast(e.message, { kind: 'error' }); }
+}
+
 // ================================================================== pages
 async function createPage(wsId, parentId = null, title = 'Untitled') {
   if (!wsId) return;
-  if (!canEdit(wsId)) { toast('You have view-only access to this workspace'); return; }
+  if (parentId ? !canEditPage(findPage(parentId)) : !canEdit(wsId)) { toast(parentId ? 'You have view-only access to this page' : 'You have view-only access to this workspace'); return; }
   try {
     const r = await T.api.post(`/api/workspaces/${wsId}/pages`, { title, parentId });
-    T.collapsedWs.delete(wsId);
+    T.collapsedWs.delete(wsById(wsId) ? wsId : SHARED);
     if (parentId) T.expanded.add(parentId);
     persist();
-    await loadPages(wsId);
+    await refreshWs(wsId);
     renderSidebar();
     await openPage(r.page.id, { fresh: title === 'Untitled' });
   } catch (e) { toast(e.message, { kind: 'error' }); }
@@ -786,12 +1063,12 @@ async function createPage(wsId, parentId = null, title = 'Untitled') {
 
 async function deletePage(id) {
   const p = findPage(id);
-  const kids = childrenOf(p.workspaceId, id).length;
+  const kids = childrenOf(sectionOf(p), id).length;
   if (!(await confirmDialog({ title: `Move “${p.title}” to trash?`, body: `${kids ? 'This page and its subpages' : 'This page'} will move to the workspace trash. Anyone in the workspace can restore it.`, confirm: 'Move to trash', danger: true }))) return;
   try {
     await T.api.del(`/api/pages/${id}`);
     if (T.current?.page.id === id || isDescendant(T.current?.page.id, id)) showHome();
-    await loadPages(p.workspaceId);
+    await refreshWs(p.workspaceId);
     renderSidebar();
   } catch (e) { toast(e.message, { kind: 'error' }); }
 }
@@ -830,7 +1107,12 @@ async function openPage(id, { replace = false, fresh = false, thread = null } = 
     token: T.conn.token,
     onStatus: ({ status }) => { if (T?.current === c) setLive(status); },
     onSynced: () => { if (T?.current === c) seed(c); },
-    onAuthenticationFailed: () => { if (T?.current === c) toast('You no longer have access to this page', { kind: 'error' }); },
+    onAuthenticationFailed: async () => {
+      if (T?.current !== c) return;
+      await Promise.all([...T.workspaces.map((w) => loadPages(w.id)), loadShared()]).catch(() => {});
+      renderSidebar();
+      if (T?.current === c && !checkCurrent()) { toast('You no longer have access to this page', { kind: 'error' }); showHome(); }
+    },
   });
   c.bubble = buildBubble(c);
   const el = $('#t-editor', T.root);
@@ -865,7 +1147,7 @@ async function openPage(id, { replace = false, fresh = false, thread = null } = 
   T.root.classList.toggle('read-only', !editable);
   $('#t-ro', T.root).hidden = editable;
   for (const b of ['#t-comments', '#t-history', '#t-more']) $(b, T.root).hidden = false;
-  $('#t-share', T.root).hidden = wsById(data.page.workspaceId)?.kind === 'private';
+  $('#t-share', T.root).hidden = false;
   renderCrumbs();
   renderMeta();
   renderPresence();
@@ -925,8 +1207,11 @@ function renderCrumbs() {
   const chain = [];
   let p = findPage(c.page.parentId);
   while (p) { chain.unshift(p); p = findPage(p.parentId); }
+  const mine = findPage(c.page.id);
+  const root = ws ? `<span class="crumb">${icon(ws.kind === 'private' ? 'lock' : 'library', 14)}<span>${esc(ws.kind === 'private' ? 'Private' : ws.name)}</span></span>`
+    : `<span class="crumb" title="${esc(mine?.workspaceName ? `From ${mine.workspaceName}` : '')}">${icon('users', 14)}<span>Shared with me</span></span>`;
   $('#t-crumbs', T.root).innerHTML = [
-    `<span class="crumb">${icon(ws?.kind === 'private' ? 'lock' : 'library', 14)}<span>${esc(ws?.kind === 'private' ? 'Private' : ws?.name || '')}</span></span><span class="crumb-sep">/</span>`,
+    `${root}<span class="crumb-sep">/</span>`,
     ...chain.map((x) => `<button class="crumb" data-open="${x.id}">${icon('page', 14)}<span>${esc(x.title)}</span></button><span class="crumb-sep">/</span>`),
     `<span class="crumb current">${icon('page', 14)}<span>${esc(c.page.title || 'Untitled')}</span></span>`,
   ].join('');
@@ -935,7 +1220,7 @@ function renderCrumbs() {
 async function renderMeta() {
   const c = T.current;
   if (!c) return;
-  const people = await loadPeople(c.page.workspaceId).catch(() => []);
+  const people = await loadPeople(c.page.id).catch(() => []);
   const by = people.find((u) => u.id === c.page.updatedBy);
   $('#t-meta', T.root).innerHTML = `${by ? avatar(by, 18) : ''}<span>${by ? `${esc(by.id === T.me.id ? 'You' : by.name)} edited` : 'Edited'} ${timeAgo(c.page.updatedAt / 1000)}</span>`;
 }
@@ -966,7 +1251,7 @@ function renderPresence() {
 function revealInTree(id) {
   let p = findPage(id);
   let changed = false;
-  if (p && T.collapsedWs.has(p.workspaceId)) { T.collapsedWs.delete(p.workspaceId); changed = true; }
+  if (p && T.collapsedWs.has(sectionOf(p))) { T.collapsedWs.delete(sectionOf(p)); changed = true; }
   while (p?.parentId) { if (!T.expanded.has(p.parentId)) { T.expanded.add(p.parentId); changed = true; } p = findPage(p.parentId); }
   if (changed) { persist(); renderSidebar(); }
   markActive();
@@ -984,7 +1269,7 @@ async function renderLinks() {
   el.innerHTML = `
     ${data.children.length ? `<section class="pl-sec"><h3>${icon('book', 15)}Subpages<span class="pl-count">${data.children.length}</span></h3>
       <div class="sub-grid">${data.children.map((p) => `<button class="sub-card" data-open="${p.id}">${icon('page', 16)}<span>${esc(p.title)}</span></button>`).join('')}
-      ${canEdit(c.page.workspaceId) ? `<button class="sub-card add" data-subpage>${icon('plus', 16)}<span>Add subpage</span></button>` : ''}</div></section>` : ''}
+      ${c.role !== 'viewer' ? `<button class="sub-card add" data-subpage>${icon('plus', 16)}<span>Add subpage</span></button>` : ''}</div></section>` : ''}
     <section class="pl-sec"><h3>${icon('page-link', 15)}Linked mentions<span class="pl-count">${data.linked.length}</span></h3>
       ${data.linked.length ? `<div class="bl-list">${data.linked.map((m) => `<button class="bl-item" data-open="${m.id}"><span class="bl-title">${icon('page', 15)}<span>${esc(m.title)}</span></span>${m.snippets.map((s) => `<span class="bl-snippet">${wiki(s)}</span>`).join('')}</button>`).join('')}</div>`
         : `<p class="bl-empty">No other pages link here yet. Type <kbd>[[</kbd> in any page in this workspace to link to it.</p>`}
@@ -1026,6 +1311,8 @@ function pageMenu(anchor) {
   if (!c) return;
   const edit = c.role !== 'viewer';
   showMenu([
+    { label: 'Share…', icon: 'user-plus', run: () => pageShareDialog(c.page.id) },
+    ...(edit && moveTargets(c.page).length ? [{ label: 'Move to…', icon: 'move', run: () => moveMenu(c.page.id, anchor) }] : []),
     { label: 'Copy link', icon: 'link', run: () => copyLink(c.page.id) },
     { label: 'Copy as markdown', icon: 'code', run: () => copy(getMarkdown(c.editor), 'Markdown copied') },
     { label: 'Version history', icon: 'clock', run: () => openDrawer('history') },
@@ -1140,7 +1427,7 @@ async function renderComments() {
   const c = T.current;
   const d = $('#t-drawer', T.root);
   if (!c) { d.innerHTML = drawerHead('Comments') + '<p class="bl-empty pad">Open a page to see its comments.</p>'; return; }
-  const people = await loadPeople(c.page.workspaceId).catch(() => []);
+  const people = await loadPeople(c.page.id).catch(() => []);
   const show = d.dataset.filter || 'open';
   const threads = c.threads.filter((t) => (show === 'open' ? !t.resolvedAt : !!t.resolvedAt));
   const personOf = (id) => people.find((p) => p.id === id) || { name: 'Former member', color: '#999' };
@@ -1221,7 +1508,7 @@ async function mentionPopup(ta) {
   const m = before.match(/(^|\s)@([\w .'-]{0,30})$/);
   if (!m || !T.current) return;
   const q = m[2].toLowerCase();
-  const people = (await loadPeople(T.current.page.workspaceId)).filter((p) => p.id !== T.me.id && p.name.toLowerCase().startsWith(q)).slice(0, 6);
+  const people = (await loadPeople(T.current.page.id)).filter((p) => p.id !== T.me.id && p.name.toLowerCase().startsWith(q)).slice(0, 6);
   if (!people.length) return;
   mentionEl = h(`<div class="suggest pop mention-pop">${people.map((p, i) => `<button class="suggest-item compact ${i ? '' : 'active'}" data-i="${i}">${avatar(p, 20)}<span class="si-title">${esc(p.name)}</span></button>`).join('')}</div>`);
   document.body.append(mentionEl);
@@ -1253,7 +1540,7 @@ async function sendComment(thread) {
   const ta = thread.querySelector('textarea');
   const body = ta.value.trim();
   if (!body) return;
-  const people = await loadPeople(c.page.workspaceId);
+  const people = await loadPeople(c.page.id);
   const mentions = people.filter((p) => body.includes(`@${p.name}`)).map((p) => p.id);
   try {
     if (thread.classList.contains('new')) {
@@ -1297,7 +1584,7 @@ async function renderHistory() {
   const c = T.current;
   const d = $('#t-drawer', T.root);
   if (!c) { d.innerHTML = drawerHead('Version history') + '<p class="bl-empty pad">Open a page to see its history.</p>'; return; }
-  const [{ versions }, people] = await Promise.all([T.api.get(`/api/pages/${c.page.id}/versions`), loadPeople(c.page.workspaceId)]);
+  const [{ versions }, people] = await Promise.all([T.api.get(`/api/pages/${c.page.id}/versions`), loadPeople(c.page.id)]);
   if (T.drawer !== 'history' || T.current !== c) return;
   const day = (ts) => new Date(ts).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
   let last = '';
@@ -1356,15 +1643,16 @@ async function renderInbox() {
   const d = $('#t-drawer', T.root);
   const { notifications } = await T.api.get('/api/notifications');
   if (T.drawer !== 'inbox') return;
-  const verb = { mention: 'mentioned you in', reply: 'replied in', joined: 'joined' };
+  const verb = { mention: 'mentioned you in', reply: 'replied in', joined: 'joined', shared: 'shared', added: 'added you to' };
+  const byWs = (k) => k === 'joined' || k === 'added';
   d.innerHTML = `${drawerHead('Inbox', notifications.some((n) => !n.readAt) ? '<button class="link-btn small" data-read-all>Mark all read</button>' : '')}
     <div class="drawer-body">
       ${notifications.length ? notifications.map((n) => `<button class="notif ${n.readAt ? '' : 'unread'}" data-notif data-id="${n.id}" data-page="${n.pageId || ''}" data-thread="${n.threadId || ''}">
         ${avatar({ name: n.actorName, color: n.actorColor }, 30)}
-        <span class="notif-main"><span class="notif-line"><strong>${esc(n.actorName || 'Someone')}</strong> ${verb[n.kind] || ''} <strong>${esc(n.kind === 'joined' ? n.workspaceName || '' : n.pageTitle || 'a page')}</strong></span>
-          ${n.text && n.kind !== 'joined' ? `<span class="notif-text">${esc(n.text)}</span>` : ''}
+        <span class="notif-main"><span class="notif-line"><strong>${esc(n.actorName || 'Someone')}</strong> ${verb[n.kind] || ''} <strong>${esc(byWs(n.kind) ? n.workspaceName || '' : n.pageTitle || 'a page')}</strong>${n.kind === 'shared' ? ' with you' : ''}</span>
+          ${n.text && !byWs(n.kind) && n.kind !== 'shared' ? `<span class="notif-text">${esc(n.text)}</span>` : ''}
           <span class="notif-time">${timeAgo(n.createdAt / 1000)}${n.workspaceName ? ` · ${esc(n.workspaceName)}` : ''}</span></span>
-      </button>`).join('') : `<div class="drawer-empty">${icon('note', 28, 1.4)}<strong>You’re all caught up</strong><span>Mentions and replies show up here.</span></div>`}
+      </button>`).join('') : `<div class="drawer-empty">${icon('note', 28, 1.4)}<strong>You’re all caught up</strong><span>Mentions, replies and pages shared with you show up here.</span></div>`}
     </div>`;
 }
 
