@@ -4,7 +4,7 @@ import '@fontsource-variable/jetbrains-mono';
 import './styles.css';
 import { api } from './api.js';
 import { icon, logo } from './icons.js';
-import { $, h, esc, showMenu, closeMenu, place, openModal, confirmDialog, toast, store, timeAgo, modKey } from './ui.js';
+import { $, h, esc, showMenu, closeMenu, place, openModal, confirmDialog, toast, store, timeAgo, modKey, copyText } from './ui.js';
 import { createEditor, loadMarkdown, getMarkdown, host, sniffStyle } from './editor.js';
 import { Selection } from '@tiptap/pm/state';
 import { mountGraph, folderColor, setFolders } from './graph.js';
@@ -603,7 +603,7 @@ async function newFolder(parent = '') {
 }
 
 function copy(text, msg) {
-  navigator.clipboard?.writeText(text).then(() => toast(msg, { kind: 'success' }), () => toast('Clipboard unavailable', { kind: 'error' }));
+  copyText(text).then((ok) => toast(ok ? msg : 'Couldn’t copy — select the text and press Ctrl+C', { kind: ok ? 'success' : 'error' }));
 }
 
 function wireSidebar() {

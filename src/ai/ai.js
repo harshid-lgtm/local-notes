@@ -2,7 +2,7 @@
 // an "Ask your notes" chat. Works against the local server or a team server.
 import MarkdownIt from 'markdown-it';
 import { icon } from '../icons.js';
-import { $, h, esc, showMenu, closeMenu, openModal, toast } from '../ui.js';
+import { $, h, esc, showMenu, closeMenu, openModal, toast, copyText } from '../ui.js';
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
 
@@ -376,7 +376,7 @@ function openResult(editor, { title, request, range, primary, anchorTop = false 
     } else if (act === 'insert') chain.insertContentAt(range.from, clean, opts).run();
     else if (act === 'top') chain.insertContentAt(0, `${clean}\n\n---\n`, opts).run();
     else if (act === 'end') chain.insertContentAt(editor.state.doc.content.size, `\n\n${clean}`, opts).run();
-    else if (act === 'copy') { navigator.clipboard?.writeText(clean); toast('Copied', { kind: 'success' }); return; }
+    else if (act === 'copy') { copyText(clean).then((ok) => toast(ok ? 'Copied' : 'Couldn’t copy', { kind: ok ? 'success' : 'error' })); return; }
     else if (act === 'retry') { start(); return; }
     close();
   });

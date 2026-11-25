@@ -6,7 +6,7 @@ import { ySyncPluginKey } from 'y-prosemirror';
 import MarkdownIt from 'markdown-it';
 import { createEditor, host, getMarkdown } from '../editor.js';
 import { icon, logo } from '../icons.js';
-import { $, h, esc, showMenu, openModal, confirmDialog, toast, store, timeAgo, modKey } from '../ui.js';
+import { $, h, esc, showMenu, openModal, confirmDialog, toast, store, timeAgo, modKey, copyText } from '../ui.js';
 import { mountGraph, setFolders, folderColor } from '../graph.js';
 import { teamClient, normalizeUrl, saveTeam, forgetTeam, savedTeams } from './client.js';
 import { setAITransport, resetAITransport, setAIHooks, forgetAIStatus, openAIMenu, openWritePanel, summarizePage, toggleAskPanel, openAISettings, closeAskPanel } from '../ai/ai.js';
@@ -1035,7 +1035,7 @@ function pageMenu(anchor) {
   ], anchor, { align: 'end' });
 }
 
-const copy = (text, msg) => navigator.clipboard?.writeText(text).then(() => toast(msg, { kind: 'success' }), () => toast('Clipboard unavailable', { kind: 'error' }));
+const copy = (text, msg) => copyText(text).then((ok) => toast(ok ? msg : 'Couldn’t copy — select the text and press Ctrl+C', { kind: ok ? 'success' : 'error' }));
 const copyLink = (id) => copy(`${T.api.base}/#/p/${id}`, 'Link copied');
 
 // ================================================================== bubble menu (format + comment)
