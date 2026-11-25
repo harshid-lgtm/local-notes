@@ -19,6 +19,7 @@ const config = {
   name: process.env.TEAM_NAME || 'Team',
   signup: process.env.SIGNUP === 'open' ? 'open' : 'invite',
   mirror: process.env.MIRROR !== 'false',
+  aiRate: Number(process.env.AI_RATE_LIMIT || 60), // AI requests per person per 10 minutes
   version: pkg.version,
 };
 

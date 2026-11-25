@@ -466,6 +466,7 @@ function menuRenderer(kind) {
 }
 
 const BLOCKS = [
+  { group: 'AI', title: 'Write with AI', desc: 'Draft, continue, brainstorm or summarize', icon: 'sparkles', keys: 'ai write generate assistant claude gpt gemini llm', run: (c) => { setTimeout(() => host.aiWrite?.()); return c; } },
   { group: 'Basic blocks', title: 'Text', desc: 'Just start writing with plain text', icon: 'text', keys: 'paragraph plain p', run: (c) => c.setParagraph() },
   { group: 'Basic blocks', title: 'Heading 1', desc: 'Big section heading', icon: 'h1', md: '#', keys: 'h1 title', run: (c) => c.setHeading({ level: 1 }) },
   { group: 'Basic blocks', title: 'Heading 2', desc: 'Medium section heading', icon: 'h2', md: '##', keys: 'h2 subtitle', run: (c) => c.setHeading({ level: 2 }) },

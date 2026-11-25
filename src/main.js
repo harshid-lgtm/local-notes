@@ -10,6 +10,7 @@ import { Selection } from '@tiptap/pm/state';
 import { mountGraph, folderColor, setFolders } from './graph.js';
 import { showTeamSignIn, startTeam } from './team/team.js';
 import { savedTeams } from './team/client.js';
+import { openAIMenu, openWritePanel, summarizePage, toggleAskPanel, openAISettings, setAIHooks, closeAskPanel } from './ai/ai.js';
 
 // ================================================================== state
 const S = {
@@ -689,6 +690,7 @@ function wireSidebar() {
     { label: 'New folder', icon: 'folder-plus', run: () => newFolder('') },
   ], e.currentTarget);
   $('#btn-today').onclick = () => openToday();
+  $('#btn-ask').onclick = () => toggleAskPanel();
   $('#btn-graph').onclick = () => showGraph();
   $('#btn-collapse').onclick = () => setCollapsed(true);
   $('#btn-expand').onclick = () => setCollapsed(false);
@@ -714,6 +716,7 @@ function vaultMenu(anchor) {
     ...savedTeams().map((c) => ({ label: c.url.replace(/^https?:\/\//, ''), icon: 'library', run: () => openTeam(c) })),
     { label: 'Connect to a team server…', icon: 'library', run: () => openTeam(null) },
     { label: 'Copy vault path', icon: 'copy', run: () => copy(S.vault.display, 'Path copied') },
+    { label: 'AI settings…', icon: 'sparkles', run: () => openAISettings() },
     'sep',
     { label: 'Close vault', icon: 'logout', run: closeVault },
   ], anchor, { className: 'wide' });
@@ -1005,6 +1008,9 @@ function pageMenu(anchor) {
     toggle('small', 'Small text', 'text'),
     toggle('wide', 'Full width', 'arrow-up-right'),
     'sep',
+    { label: 'Summarize with AI', icon: 'sparkles', run: () => summarizePage(editor, 'summary') },
+    { label: 'Find action items with AI', icon: 'todo', run: () => summarizePage(editor, 'actions') },
+    'sep',
     { label: S.favorites.includes(path) ? 'Remove from Favorites' : 'Add to Favorites', icon: 'star', run: () => toggleFavorite(path) },
     { label: 'Copy link to page', icon: 'page-link', run: () => copy(`[[${stripMd(baseName(path))}]]`, 'Wikilink copied') },
     { label: 'Copy file path', icon: 'copy', run: () => copy(`${S.vault.display}${S.vault.display.includes('\\') ? '\\' : '/'}${S.vault.display.includes('\\') ? path.replace(/\//g, '\\') : path}`, 'Path copied') },
@@ -1019,6 +1025,8 @@ function pageMenu(anchor) {
 // ================================================================== bubble menu & block handle
 function buildBubble() {
   const el = h(`<div class="bubble pop">
+    <button class="bb-ai" data-cmd="ai" title="Ask AI (${modKey}+J)">${icon('sparkles', 15)}<span class="bb-text">Ask AI</span></button>
+    <span class="bb-sep"></span>
     <button class="bb-turn" data-cmd="turn"><span class="bb-turn-label">Text</span>${icon('chevron-down', 13, 2)}</button>
     <span class="bb-sep"></span>
     <button data-cmd="bold" title="Bold (${modKey}+B)">${icon('bold', 16, 2.2)}</button>
@@ -1051,6 +1059,7 @@ function buildBubble() {
       case 'link': showLink(true); break;
       case 'unlink': c.extendMarkRange('link').unsetLink().run(); showLink(false); break;
       case 'turn': turnIntoMenu(b); break;
+      case 'ai': openAIMenu(editor, b); break;
       default:
     }
     syncBubble();
@@ -1380,6 +1389,9 @@ function openPalette(initial = '') {
     ['New page from template', 'template', () => openTemplatePicker({ mode: 'new' })],
     ['Open today’s note', 'calendar', () => openToday()],
     ['Open graph view', 'graph', () => showGraph()],
+    ['Ask AI about your notes', 'sparkles', () => toggleAskPanel()],
+    ['Summarize this page with AI', 'sparkles', () => S.current && summarizePage(editor, 'summary')],
+    ['AI settings', 'sparkles', () => openAISettings()],
     ['New folder', 'folder-plus', () => newFolder('')],
     ['Go home', 'home', () => showHome()],
     ['Switch to dark theme', 'moon', () => { prefs.theme = 'dark'; applyPrefs(); savePrefs(); }],
@@ -1516,6 +1528,7 @@ function buildShell() {
       </div>
       <nav class="sb-nav">
         <button class="nav-item" id="btn-search">${icon('search', 17)}<span>Search</span><kbd>${modKey} K</kbd></button>
+        <button class="nav-item ai-nav" id="btn-ask">${icon('sparkles', 17)}<span>Ask AI</span><kbd>${modKey} J</kbd></button>
         <button class="nav-item" id="btn-home">${icon('home', 17)}<span>Home</span></button>
         <button class="nav-item" id="btn-today">${icon('calendar', 17)}<span>Today</span></button>
         <button class="nav-item" id="btn-graph">${icon('graph', 17)}<span>Graph view</span><kbd>${modKey} G</kbd></button>
@@ -1639,6 +1652,12 @@ function wireGlobalKeys() {
     } else if (mod && e.altKey && k === 'n') { e.preventDefault(); newNote(S.current ? dirName(S.current.path) : ''); }
     else if (mod && k === 's') { e.preventDefault(); flushSave(); }
     else if (mod && k === 'g' && !e.shiftKey) { e.preventDefault(); showGraph(); }
+    else if (mod && k === 'j') {
+      e.preventDefault();
+      if (editor.isFocused && !editor.state.selection.empty) openAIMenu(editor, $('.bubble [data-cmd="ai"]') || { x: innerWidth / 2, y: 120 });
+      else if (editor.isFocused) openWritePanel(editor);
+      else toggleAskPanel();
+    }
     else if (mod && e.key === '\\') { e.preventDefault(); setCollapsed(!prefs.collapsed); }
   });
   window.addEventListener('focus', checkExternal);
@@ -1660,11 +1679,22 @@ const fullPathOf = (rel) => {
   return S.vault.path.replace(/[\\/]+$/, '') + sep + rel.split('/').join(sep);
 };
 
+function installAIHooks() {
+  host.aiWrite = () => openWritePanel(editor);
+  setAIHooks({
+    openLink: (l) => host.openLink(l),
+    vaultName: () => S.vault?.name || 'your notes',
+    currentPage: () => (S.current ? { id: S.current.path, title: stripMd(baseName(S.current.path)) } : null),
+  });
+}
+
 // ================================================================== teams
 // From the desktop/local app: leave the local vault UI and open a team server.
 async function openTeam(conn) {
   await flushSave();
+  closeAskPanel();
   const back = () => {
+    installAIHooks();
     if (S.vault) { $('#shell').hidden = false; $('#welcome').hidden = true; }
     else showWelcome();
   };
@@ -1701,6 +1731,7 @@ async function boot() {
   }
   applyPrefs();
   buildShell();
+  installAIHooks();
   wireGlobalKeys();
   const teamInfo = await fetch('/api/team/info').then((r) => (r.ok ? r.json() : null)).catch(() => null);
   if (teamInfo?.version) {

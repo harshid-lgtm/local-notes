@@ -4,6 +4,12 @@ import path from 'node:path';
 import { newId, now } from './db.js';
 import { hashPassword, checkPassword, newToken, hashToken, pickColor, rateLimit } from './auth.js';
 import { subscribe, sendTo } from './events.js';
+import { createRequire } from 'node:module';
+import Anthropic from '@anthropic-ai/sdk';
+
+// The provider layer is shared with the desktop app (server/ai.js in the repository).
+const aiLib = createRequire(import.meta.url)('../../server/ai.js');
+const aiClient = aiLib.createAI({ Anthropic });
 
 export class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -579,6 +585,70 @@ export function createApi({ db, config, collab }) {
   });
 
   route('GET', '/api/events', ({ user, res }) => { subscribe(user.id, res); return undefined; }, { stream: true });
+
+  // ---------------------------------------------------------------- AI (admin picks the provider; members use it)
+  const aiSettings = () => { try { return JSON.parse(db.get("SELECT value FROM settings WHERE key = 'ai'")?.value || '{}'); } catch { return {}; } };
+  const saveAISettings = (v) => db.run("INSERT INTO settings (key, value) VALUES ('ai', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify(v));
+  const requireAdmin = (user) => { if (!user.is_admin) fail(403, 'Only the server admin can change AI settings'); };
+  const override = (b = {}) => Object.fromEntries(['provider', 'apiKey', 'baseUrl', 'model'].filter((k) => b[k]).map((k) => [k, b[k]]));
+  const aiFail = (e) => fail(e.status || 502, e.message);
+
+  route('GET', '/api/ai/status', () => {
+    const p = aiLib.publicSettings(aiSettings());
+    return { enabled: p.enabled, provider: p.provider, model: p.model, label: p.providers.find((x) => x.id === p.provider)?.label || null };
+  });
+  route('GET', '/api/ai/settings', ({ user }) => { requireAdmin(user); return aiLib.publicSettings(aiSettings()); });
+  route('PUT', '/api/ai/settings', ({ user, body }) => {
+    requireAdmin(user);
+    try { saveAISettings(aiLib.applySettings(aiSettings(), body)); } catch (e) { aiFail(e); }
+    return aiLib.publicSettings(aiSettings());
+  });
+  route('POST', '/api/ai/models', async ({ user, body }) => {
+    requireAdmin(user);
+    try { return { models: await aiClient.listModels(aiSettings(), override(body)) }; } catch (e) { return aiFail(e); }
+  });
+  route('POST', '/api/ai/test', async ({ user, body }) => {
+    requireAdmin(user);
+    try { return { reply: await aiClient.test(aiSettings(), override(body)) }; } catch (e) { return aiFail(e); }
+  });
+
+  async function streamAI(res, start, head) {
+    const ac = new AbortController();
+    let iterator;
+    try { iterator = start(ac.signal); } catch (e) { return aiFail(e); }
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+    res.on('close', () => { if (!res.writableEnded) ac.abort(); });
+    if (head) res.write(`${JSON.stringify(head)}\n`);
+    try {
+      for await (const t of iterator) res.write(`${JSON.stringify({ delta: t })}\n`);
+      res.write('{"done":true}\n');
+    } catch (e) {
+      if (e.name !== 'AbortError') res.write(`${JSON.stringify({ error: e.message || 'The AI request failed' })}\n`);
+    }
+    res.end();
+    return undefined;
+  }
+  const aiAllowed = (user) => { if (!rateLimit(`ai:${user.id}`, config.aiRate, 10 * 60 * 1000)) fail(429, 'You’ve reached the AI limit for now. Try again in a few minutes.'); };
+
+  route('POST', '/api/ai/complete', ({ user, body, res }) => {
+    aiAllowed(user);
+    return streamAI(res, (signal) => aiClient.stream(aiSettings(), {
+      system: String(body.system || ''), messages: [{ role: 'user', content: String(body.prompt || '').slice(0, 400000) }],
+      effort: ['low', 'medium', 'high'].includes(body.effort) ? body.effort : 'low', maxTokens: 16000, signal,
+    }));
+  }, { stream: true });
+
+  route('POST', '/api/ai/ask', ({ user, body, res }) => {
+    aiAllowed(user);
+    // only pages from workspaces this person belongs to (their private space included)
+    const docs = db.all(`SELECT p.id, p.title, p.markdown AS text, w.kind, w.name AS ws FROM pages p JOIN members m ON m.workspace_id = p.workspace_id AND m.user_id = ?
+      JOIN workspaces w ON w.id = p.workspace_id WHERE p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT 3000`, user.id);
+    const picked = aiLib.pickNotes(String(body.question || ''), docs, { currentId: body.currentPath || null });
+    const history = (Array.isArray(body.history) ? body.history : []).slice(-8).filter((m) => m && ['user', 'assistant'].includes(m.role) && typeof m.content === 'string');
+    return streamAI(res, (signal) => aiClient.stream(aiSettings(), {
+      ...aiLib.askPrompt(picked, config.name), messages: [...history, { role: 'user', content: String(body.question || '') }], effort: 'medium', maxTokens: 16000, signal,
+    }), { sources: picked.map((p) => ({ id: p.id, title: p.title })) });
+  }, { stream: true });
 
   // ---------------------------------------------------------------- dispatch
   async function handle(req, res) {

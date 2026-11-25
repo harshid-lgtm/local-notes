@@ -9,6 +9,7 @@ import { icon, logo } from '../icons.js';
 import { $, h, esc, showMenu, openModal, confirmDialog, toast, store, timeAgo, modKey } from '../ui.js';
 import { mountGraph, setFolders, folderColor } from '../graph.js';
 import { teamClient, normalizeUrl, saveTeam, forgetTeam, savedTeams } from './client.js';
+import { setAITransport, resetAITransport, setAIHooks, forgetAIStatus, openAIMenu, openWritePanel, summarizePage, toggleAskPanel, openAISettings, closeAskPanel } from '../ai/ai.js';
 
 let T = null; // the running team session
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
@@ -131,6 +132,20 @@ export async function startTeam(conn, { hosted = false, onExit = null } = {}) {
   };
   saveTeam({ ...conn, user: me.user });
   installHost();
+  setAITransport({
+    base: T.api.base,
+    headers: () => ({ Authorization: `Bearer ${T.conn.token}` }),
+    canConfigure: !!T.me.isAdmin,
+    label: 'your team server',
+    statusPath: T.me.isAdmin ? '/api/ai/settings' : '/api/ai/status',
+  });
+  forgetAIStatus();
+  setAIHooks({
+    openLink: (l) => host.openLink(l),
+    vaultName: () => 'your workspaces',
+    currentPage: () => (T?.current ? { id: T.current.page.id, title: T.current.page.title } : null),
+  });
+  host.aiWrite = () => T?.current && openWritePanel(T.current.editor);
   buildShell();
   await Promise.all(T.workspaces.map((w) => loadPages(w.id)));
   renderSidebar();
@@ -145,6 +160,9 @@ export async function startTeam(conn, { hosted = false, onExit = null } = {}) {
 export function stopTeam() {
   if (!T) return;
   closePage();
+  closeAskPanel();
+  resetAITransport();
+  forgetAIStatus();
   document.removeEventListener('keydown', T.keyHandler);
   T.events?.close();
   T.graph?.destroy();
@@ -264,6 +282,7 @@ function buildShell() {
       </div>
       <nav class="sb-nav">
         <button class="nav-item" data-nav="search">${icon('search', 17)}<span>Search</span><kbd>${modKey} K</kbd></button>
+        <button class="nav-item ai-nav" data-nav="ask">${icon('sparkles', 17)}<span>Ask AI</span><kbd>${modKey} J</kbd></button>
         <button class="nav-item" data-nav="inbox">${icon('note', 17)}<span>Inbox</span><b class="badge" id="t-badge" hidden></b></button>
         <button class="nav-item" data-nav="home">${icon('home', 17)}<span>Home</span></button>
         <button class="nav-item" data-nav="graph">${icon('graph', 17)}<span>Graph view</span></button>
@@ -315,6 +334,7 @@ function buildShell() {
     const nav = e.target.closest('[data-nav]')?.dataset.nav;
     if (nav === 'search') openSearch();
     else if (nav === 'inbox') toggleDrawer('inbox');
+    else if (nav === 'ask') toggleAskPanel();
     else if (nav === 'home') showHome();
     else if (nav === 'graph') showGraph();
     else if (nav === 'new-ws') newWorkspace();
@@ -380,6 +400,12 @@ function wireKeys() {
       if (k === 'k' && T.current?.editor?.isFocused && !T.current.editor.state.selection.empty) return;
       e.preventDefault();
       if (!$('.palette')) openSearch();
+    } else if (mod && k === 'j') {
+      e.preventDefault();
+      const ed = T.current?.editor;
+      if (ed?.isFocused && !ed.state.selection.empty) openAIMenu(ed, T.current.bubble.querySelector('[data-cmd="ai"]') || { x: innerWidth / 2, y: 120 });
+      else if (ed?.isFocused && ed.isEditable) openWritePanel(ed);
+      else toggleAskPanel();
     } else if (mod && e.altKey && k === 'm') {
       e.preventDefault();
       startComment();
@@ -536,6 +562,7 @@ function accountMenu(anchor) {
     { custom: h(`<div class="menu-server">${icon('drive', 13)}<span>${esc(T.api.base.replace(/^https?:\/\//, ''))}</span></div>`) },
     'sep',
     { label: 'Profile & password…', icon: 'pencil', run: profileDialog },
+    ...(T.me.isAdmin ? [{ label: 'AI settings (admin)…', icon: 'sparkles', run: () => openAISettings() }] : []),
     { label: 'Appearance', icon: 'sun', run: () => themeMenuTeam(anchor) },
     ...(others.length ? ['sep', { header: 'Other servers' }, ...others.map((c) => ({ label: c.url.replace(/^https?:\/\//, ''), icon: 'drive', run: () => { const exit = T.onExit; stopTeam(); startTeam(c, { onExit: exit }); } }))] : []),
     'sep',
@@ -1001,6 +1028,8 @@ function pageMenu(anchor) {
     { label: 'Copy link', icon: 'link', run: () => copyLink(c.page.id) },
     { label: 'Copy as markdown', icon: 'code', run: () => copy(getMarkdown(c.editor), 'Markdown copied') },
     { label: 'Version history', icon: 'clock', run: () => openDrawer('history') },
+    { label: 'Summarize with AI', icon: 'sparkles', run: () => summarizePage(c.editor, 'summary') },
+    { label: 'Find action items with AI', icon: 'todo', run: () => summarizePage(c.editor, 'actions') },
     { label: 'Open local graph', icon: 'graph', run: () => showGraph(c.page.workspaceId, c.page.id) },
     ...(edit ? ['sep', { label: 'Move to trash', icon: 'trash', danger: true, run: () => deletePage(c.page.id) }] : []),
   ], anchor, { align: 'end' });
@@ -1012,6 +1041,8 @@ const copyLink = (id) => copy(`${T.api.base}/#/p/${id}`, 'Link copied');
 // ================================================================== bubble menu (format + comment)
 function buildBubble(c) {
   const el = h(`<div class="bubble pop">
+    <button data-cmd="ai" class="bb-ai" title="Ask AI (${modKey}+J)">${icon('sparkles', 15)}<span class="bb-text">Ask AI</span></button>
+    <span class="bb-sep"></span>
     <button data-cmd="comment" class="bb-comment" title="Comment (${modKey}+Alt+M)">${icon('note', 16, 2)}<span class="bb-text">Comment</span></button>
     <span class="bb-sep"></span>
     <button data-cmd="bold" title="Bold">${icon('bold', 16, 2.2)}</button>
@@ -1028,6 +1059,7 @@ function buildBubble(c) {
     const ch = c.editor.chain().focus();
     switch (b.dataset.cmd) {
       case 'comment': startComment(); break;
+      case 'ai': openAIMenu(c.editor, b); break;
       case 'bold': ch.toggleBold().run(); break;
       case 'italic': ch.toggleItalic().run(); break;
       case 'strike': ch.toggleStrike().run(); break;

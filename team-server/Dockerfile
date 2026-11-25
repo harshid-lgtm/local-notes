@@ -18,6 +18,7 @@ WORKDIR /app/team-server
 COPY team-server/package.json team-server/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY team-server/src ./src
+COPY server/ai.js /app/server/ai.js
 COPY --from=ui /src/public /app/public
 RUN mkdir -p /data && chown node:node /data
 USER node

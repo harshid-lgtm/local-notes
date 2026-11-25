@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   text TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, read_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS notif_user ON notifications(user_id, read_at);
+CREATE TABLE IF NOT EXISTS settings ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
 `;
 
 export function openDb(dataDir) {

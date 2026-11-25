@@ -9,6 +9,10 @@ const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const ai = require('./ai');
+const AnthropicSDK = require('@anthropic-ai/sdk');
+
+const aiClient = ai.createAI({ Anthropic: AnthropicSDK.default || AnthropicSDK });
 
 const IGNORED = new Set(['.git', '.obsidian', '.trash', 'node_modules', '.DS_Store', '__pycache__']);
 const NOTE_EXT = '.md';
@@ -190,6 +194,7 @@ function createVaultServer({ configDir, publicDir }) {
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   };
   const index = new LinkIndex();
+  const aiOverride = (b = {}) => Object.fromEntries(['provider', 'apiKey', 'baseUrl', 'model'].filter((k) => b[k]).map((k) => [k, b[k]]));
 
   const currentVault = () => (config.vault && isDir(config.vault) ? config.vault : null);
   const vaultOrError = () => {
@@ -491,7 +496,49 @@ function createVaultServer({ configDir, publicDir }) {
       const s = obsidianSetting(v, 'daily-notes.json');
       return { folder: s.folder || '', format: s.format || 'YYYY-MM-DD', template: s.template || '' };
     },
+
+    // ---- AI (keys stay in this machine's config; requests go straight to the provider)
+    'GET /api/ai/settings': () => ai.publicSettings(config.ai),
+    'PUT /api/ai/settings': (b) => {
+      config.ai = ai.applySettings(config.ai, b);
+      saveConfig();
+      return ai.publicSettings(config.ai);
+    },
+    'POST /api/ai/models': async (b) => ({ models: await aiClient.listModels(config.ai || {}, aiOverride(b)) }),
+    'POST /api/ai/test': async (b) => ({ reply: await aiClient.test(config.ai || {}, aiOverride(b)) }),
   };
+
+  // Streams NDJSON lines: {sources} first (ask only), then {delta}…, then {done} or {error}.
+  async function streamAI(req, res, kind) {
+    const b = JSON.parse((await readBody(req)) || '{}');
+    let gen;
+    let head = null;
+    if (kind === 'ask') {
+      const v = vaultOrError();
+      const { notes } = await buildTree(v);
+      await index.refresh(v, notes);
+      const tpl = `${toPosix(obsidianSetting(v, 'templates.json').folder || 'Templates')}/`;
+      const docs = notes.filter((n) => !n.path.startsWith(tpl)).map((n) => ({ id: n.path, title: n.name, text: (index.cache.get(n.path)?.text || '').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '') }));
+      const picked = ai.pickNotes(b.question || '', docs, { currentId: b.currentPath || null });
+      const history = (Array.isArray(b.history) ? b.history : []).slice(-8).filter((m) => m && ['user', 'assistant'].includes(m.role) && typeof m.content === 'string');
+      gen = (signal) => aiClient.stream(config.ai || {}, { ...ai.askPrompt(picked, path.basename(v)), messages: [...history, { role: 'user', content: String(b.question || '') }], effort: 'medium', maxTokens: 16000, signal });
+      head = { sources: picked.map((p) => ({ id: p.id, title: p.title })) };
+    } else {
+      gen = (signal) => aiClient.stream(config.ai || {}, { system: String(b.system || ''), messages: [{ role: 'user', content: String(b.prompt || '') }], effort: ['low', 'medium', 'high'].includes(b.effort) ? b.effort : 'low', maxTokens: 16000, signal });
+    }
+    const ac = new AbortController();
+    const iterator = gen(ac.signal); // throws now if AI isn't configured -> normal JSON error
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.on('close', () => { if (!res.writableEnded) ac.abort(); });
+    if (head) res.write(`${JSON.stringify(head)}\n`);
+    try {
+      for await (const t of iterator) res.write(`${JSON.stringify({ delta: t })}\n`);
+      res.write('{"done":true}\n');
+    } catch (e) {
+      if (e.name !== 'AbortError') res.write(`${JSON.stringify({ error: e.message || 'The AI request failed' })}\n`);
+    }
+    res.end();
+  }
 
   async function handle(req, res) {
     const url = new URL(req.url, 'http://localhost');
@@ -499,6 +546,10 @@ function createVaultServer({ configDir, publicDir }) {
     if (!['localhost', '127.0.0.1', '[::1]'].includes(host)) return sendJson(res, 403, { error: 'Forbidden host' });
     try {
       if (url.pathname.startsWith('/api/')) {
+        if (req.method === 'POST' && (url.pathname === '/api/ai/complete' || url.pathname === '/api/ai/ask')) {
+          if (!String(req.headers['content-type'] || '').includes('application/json')) throw new ApiError(415, 'Expected JSON');
+          return await streamAI(req, res, url.pathname.endsWith('ask') ? 'ask' : 'complete');
+        }
         if (url.pathname === '/api/file' && req.method === 'GET') {
           const v = vaultOrError();
           const p = safeJoin(v, url.searchParams.get('path'));

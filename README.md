@@ -4,6 +4,8 @@
 
 ![Local Notes](site/img/hero-light.png)
 
+📖 **[Read the documentation](docs/README.md)** · 🌐 **[Website](https://harshid-lgtm.github.io/local-notes/)**
+
 ## Download
 
 Get the latest installer from **[Releases](https://github.com/harshid-lgtm/local-notes/releases/latest)**:
@@ -27,11 +29,13 @@ Installed apps update themselves when a new release is published.
 - **Wiki structure** — nest pages inside pages (stored as `Page.md` + `Page/`), breadcrumbs, subpage lists and a floating outline.
 - **Templates & daily notes** — `{{title}}`, `{{date}}`, `{{time}}` variables; uses Obsidian's template and daily-note settings when present.
 - **Instant search & command palette** — `Ctrl/⌘ K`.
+- **AI assistant** — rewrite, summarize and draft with AI, and *Ask your notes* with cited answers. Choose Claude, OpenAI, Gemini, any OpenAI-compatible API, or free local models via Ollama. Off until you turn it on. [Learn more](docs/ai.md).
 - **Obsidian compatible** — callouts, embeds, tags, `==highlights==`, frontmatter, Windows line endings; files are only rewritten when you edit them, and round-trip byte for byte.
 
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl/⌘ K` | Search, commands (`>`), create pages |
+| `Ctrl/⌘ J` | Ask AI |
 | `Ctrl/⌘ G` | Graph view |
 | `Ctrl/⌘ Alt N` | New page |
 | `Ctrl/⌘ \` | Toggle sidebar |

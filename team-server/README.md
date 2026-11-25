@@ -1,6 +1,6 @@
 # Local Notes team server
 
-Self-hosted server for Local Notes teams: accounts, shared workspaces, a private space for every person, live co-editing, version history, comments with @mentions and an inbox. Your team uses it from the desktop app, or from any browser at your server's address.
+Self-hosted server for Local Notes teams: accounts, shared workspaces, a private space for every person, live co-editing, version history, comments with @mentions, an inbox, and an optional AI assistant the admin configures once for everyone. Your team uses it from the desktop app, or from any browser at your server's address.
 
 Everything lives in one data folder: a SQLite database plus a **markdown mirror** of every page (`/data/vault`), laid out exactly like a Local Notes / Obsidian vault.
 
@@ -56,6 +56,11 @@ Put it behind any HTTPS reverse proxy (Caddy, nginx, Traefik) that supports WebS
 | `TEAM_NAME` | `Team` | Shown on the sign-in page; name of the first workspace |
 | `SIGNUP` | `invite` | `invite`: only the first user signs up freely, others need an invite link. `open`: anyone can sign up |
 | `MIRROR` | `true` | Write every page to `DATA_DIR/vault` as markdown |
+| `AI_RATE_LIMIT` | `60` | AI requests per person per 10 minutes |
+
+## AI
+
+Sign in as the admin (the first account) and open **AI settings (admin)** from your account menu. Pick Claude, OpenAI, Gemini, an OpenAI-compatible API, or an Ollama server, add the key and choose a model. Members can then use AI without keys of their own. The key is stored in the server database and never sent to browsers. See the [AI docs](../docs/ai.md).
 
 ## How it works
 
