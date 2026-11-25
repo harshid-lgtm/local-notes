@@ -140,6 +140,9 @@
     .teams .grid { margin-top: 40px; }
     .teams .card { background: rgba(255,255,255,.05); box-shadow: inset 0 0 0 1px rgba(255,255,255,.09); }
     .teams .card p { color: #b9b7b0; }
+    .team-frame { margin-top: 36px; box-shadow: 0 0 0 1px rgba(255,255,255,.08), 0 30px 80px -20px rgba(0,0,0,.7); }
+    .teams-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 32px; color: #b9b7b0; font-size: 14px; }
+    .teams-cta b { color: #fff; }
     .soon { display: inline-block; margin-left: 10px; vertical-align: middle; font-size: 12px; font-weight: 700; letter-spacing: .06em; padding: 4px 10px; border-radius: 99px; background: rgba(255,255,255,.12); color: #fff; }
     .presence { display: flex; margin-top: 30px; }
     .presence span { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: #fff; margin-left: -6px; box-shadow: 0 0 0 3px #171715; }
@@ -199,7 +202,7 @@
 
   <header class="hero">
     <div class="wrap">
-      <span class="pill reveal"><b>NEW</b>Graph view, backlinks &amp; templates</span>
+      <span class="pill reveal"><b>NEW</b>Teams: live co-editing on your own server</span>
       <h1 class="reveal">Your notes, <span class="serif">beautifully</span> simple.</h1>
       <p class="lede reveal">A calm, Notion-style editor for plain markdown files. Link ideas with <b>[[wikilinks]]</b>, see how they connect, and keep every word in files you own. Works with your Obsidian vault.</p>
       <div class="cta reveal">
@@ -279,15 +282,17 @@
   <section id="teams">
     <div class="wrap">
       <div class="teams reveal">
-        <div class="eyebrow">Coming next</div>
-        <h2>Local Notes for <span class="serif">Teams</span><span class="soon">IN DEVELOPMENT</span></h2>
-        <p class="sub">Shared workspaces on a server you control — with a private space for everyone, live co-editing and a tab right inside Microsoft Teams.</p>
-        <div class="presence"><span style="background:#e8835a">MC</span><span style="background:#2f76e4">AR</span><span style="background:#7c4fd6">SK</span><span style="background:#23946a">+4</span></div>
+        <div class="eyebrow">Local Notes for Teams</div>
+        <h2>Write <span class="serif">together</span>, own it together.</h2>
+        <p class="sub">Run the team server on your own machine or cloud — one command with Docker. Shared workspaces, a private space for everyone, and edits that appear as you type.</p>
+        <div class="presence"><span style="background:#5b6bd6">MC</span><span style="background:#2f76e4">AR</span><span style="background:#7c4fd6">SK</span><span style="background:#23946a">+4</span></div>
+        <div class="frame team-frame"><img src="img/team-collab.png" alt="Two people editing a launch plan together, with a live cursor and a comment thread" loading="lazy"></div>
         <div class="grid">
           <div class="card"><h3>Live co-editing</h3><p>See teammates’ cursors and edits as they happen. Shared notes are still saved as markdown on your server.</p></div>
-          <div class="card"><h3>Private &amp; shared</h3><p>Every person keeps a private space; teams share workspaces with owner, editor and viewer roles.</p></div>
-          <div class="card"><h3>Inside Microsoft Teams</h3><p>Pin a page to any channel and sign in with your Microsoft 365 account. History, comments and @mentions included.</p></div>
+          <div class="card"><h3>Private &amp; shared</h3><p>Every person keeps a private space; teams share workspaces with owner, editor and viewer roles and invite links.</p></div>
+          <div class="card"><h3>Comments, history &amp; inbox</h3><p>Discuss any sentence, @mention teammates, restore any earlier version, and catch up from one inbox.</p></div>
         </div>
+        <div class="teams-cta"><a class="btn blue" href="https://github.com/harshid-lgtm/local-notes/tree/main/team-server#readme">Set up a team server</a><span>Free &amp; self-hosted · <b>Microsoft Teams</b> tab coming next</span></div>
       </div>
     </div>
   </section>
@@ -328,7 +333,8 @@
         <details><summary>Does it work with my Obsidian vault?</summary><p>Yes. Point Local Notes at your vault and keep using both. Wikilinks, embeds, callouts, tags, <code>==highlights==</code>, frontmatter, templates and daily-note settings are all understood, and files are only rewritten when you edit them.</p></details>
         <details><summary>Is it free?</summary><p>Yes — Local Notes is free and open source under the MIT licence.</p></details>
         <details><summary>Windows or macOS says the app is from an unknown developer</summary><p>Early releases aren’t code-signed yet. On Windows choose <b>More info → Run anyway</b>. On macOS, right-click the app in Applications and choose <b>Open</b> the first time.</p></details>
-        <details><summary>When is the Teams version coming?</summary><p>It’s in development: a self-hosted server for shared workspaces with live co-editing, private spaces, version history, comments and a Microsoft Teams tab. Star the repo on GitHub to follow along.</p></details>
+        <details><summary>How do teams use Local Notes?</summary><p>Someone on your team runs the free team server (a single Docker command, with automatic HTTPS). Everyone then connects from the desktop app or simply opens the server’s address in a browser. Shared pages are also mirrored as markdown files on the server, so your knowledge never gets locked in.</p></details>
+        <details><summary>Is my private space really private?</summary><p>Yes. Pages in your private space are only visible to your account; the server enforces it. Team workspaces are visible to their members only.</p></details>
       </div>
     </div>
   </section>

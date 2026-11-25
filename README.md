@@ -55,6 +55,8 @@ Project layout:
 - `src/` — the editor UI (TipTap/ProseMirror), bundled with esbuild into `public/`
 - `server/core.js` — the local vault API (files, search, backlinks, graph, templates)
 - `electron/` — the desktop shell (window, native dialogs, auto-update)
+- `src/team/` — team mode: sign-in, shared workspaces, co-editing, comments, history, inbox
+- `team-server/` — the self-hosted team server (REST + Yjs WebSocket + SQLite) and its Docker deploy kit
 - `site/` — the landing page, published to GitHub Pages
 - `.github/workflows/` — `release.yml` builds all installers when you push a `v*` tag; `pages.yml` publishes the site
 
@@ -65,9 +67,23 @@ npm version patch          # bumps package.json and creates a git tag
 git push --follow-tags     # GitHub Actions builds Windows, macOS and Linux installers
 ```
 
+## Teams
+
+Run the **[Local Notes team server](team-server/README.md)** (one Docker command with automatic HTTPS) and your team gets:
+
+- **Shared workspaces** with owner / editor / viewer roles and invite links, plus a **private space** for every person
+- **Live co-editing** with presence and named cursors; edits merge cleanly, even after a dropped connection
+- **Comments** on any text, threads, resolve, and **@mentions**
+- **Version history** with named versions and one-click restore
+- An **inbox** for mentions and replies, live sidebar updates, team-wide search, backlinks and graph
+- A **markdown mirror** of every page on the server, in the same layout as a Local Notes / Obsidian vault
+
+Teammates connect from the desktop app (*vault menu → Connect to a team server*) or just open the server's address in a browser.
+
+![Team co-editing](site/img/team-collab.png)
+
 ## Roadmap
 
-- **Teams** — a self-hosted server with shared workspaces, private spaces, live co-editing, version history, comments and @mentions.
 - **Microsoft Teams** — a channel tab with Microsoft 365 sign-in.
 
 ## License

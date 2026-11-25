@@ -8,6 +8,8 @@ import { $, h, esc, showMenu, closeMenu, place, openModal, confirmDialog, toast,
 import { createEditor, loadMarkdown, getMarkdown, host, sniffStyle } from './editor.js';
 import { Selection } from '@tiptap/pm/state';
 import { mountGraph, folderColor, setFolders } from './graph.js';
+import { showTeamSignIn, startTeam } from './team/team.js';
+import { savedTeams } from './team/client.js';
 
 // ================================================================== state
 const S = {
@@ -205,10 +207,15 @@ function showWelcome() {
           <button class="btn ghost large" id="wl-create">${icon('plus', 18)}<span>Create a new vault</span></button>
         </div>
         <div class="wl-hint">Works great with your existing Obsidian vault</div>
+        <button class="wl-team" id="wl-team">${icon('library', 16)}<span>Working with a team? <b>Connect to a team server</b></span>${icon('arrow-right', 15)}</button>
       </div>
-      ${recent.length || obsidianOnly.length ? `<div class="wl-card">
+      ${recent.length || obsidianOnly.length || savedTeams().length ? `<div class="wl-card">
         ${list('Recent vaults', recent, 'arrow-right')}
         ${list('Found Obsidian vaults', obsidianOnly, 'arrow-right')}
+        ${savedTeams().length ? `<div class="wl-section"><div class="wl-label">Team servers</div>${savedTeams().map((c) => `<button class="vault-row" data-team="${esc(c.url)}">
+          <span class="vault-tile team" style="--hue:${hue(c.url)}">${icon('library', 17)}</span>
+          <span class="vault-meta"><span class="vault-name">${esc(c.url.replace(/^https?:\/\//, ''))}</span><span class="vault-path">${esc(c.user?.name || '')} · ${esc(c.user?.email || '')}</span></span>
+          <span class="vault-go">${icon('arrow-right', 16)}</span></button>`).join('')}</div>` : ''}
       </div>` : ''}
       <div class="wl-preview" aria-hidden="true">
         <div class="pv-side"><i></i><i></i><i class="on"></i><i></i><i></i></div>
@@ -217,7 +224,9 @@ function showWelcome() {
     </div>`;
   $('#wl-choose').onclick = () => openFolderPicker();
   $('#wl-create').onclick = () => createVaultDialog();
-  w.querySelectorAll('.vault-row').forEach((b) => (b.onclick = () => chooseVault(b.dataset.path)));
+  w.querySelectorAll('.vault-row[data-path]').forEach((b) => (b.onclick = () => chooseVault(b.dataset.path)));
+  w.querySelectorAll('.vault-row[data-team]').forEach((b) => (b.onclick = () => openTeam(savedTeams().find((c) => c.url === b.dataset.team))));
+  $('#wl-team').onclick = () => openTeam(null);
 }
 
 function hue(s) {
@@ -700,6 +709,10 @@ function vaultMenu(anchor) {
     ...(others.length ? [{ header: 'Switch vault' }, ...others.map((o) => ({ label: o.name, icon: 'book', run: () => switchVault(o.path) }))] : []),
     { label: 'Open another folder…', icon: 'folder-open', run: () => openFolderPicker() },
     { label: 'Create a new vault…', icon: 'plus', run: () => createVaultDialog() },
+    'sep',
+    { header: 'Team servers' },
+    ...savedTeams().map((c) => ({ label: c.url.replace(/^https?:\/\//, ''), icon: 'library', run: () => openTeam(c) })),
+    { label: 'Connect to a team server…', icon: 'library', run: () => openTeam(null) },
     { label: 'Copy vault path', icon: 'copy', run: () => copy(S.vault.display, 'Path copied') },
     'sep',
     { label: 'Close vault', icon: 'logout', run: closeVault },
@@ -1144,7 +1157,7 @@ async function renderPageLinks(path) {
     <section class="pl-sec">
       <h3>${icon('page-link', 15)}Linked mentions<span class="pl-count">${data.linked.length}</span></h3>
       ${data.linked.length ? `<div class="bl-list">${data.linked.map(mention).join('')}</div>`
-        : `<p class="pl-empty">No other pages link here yet. Type <kbd>[[</kbd> in any page to link to “${esc(stripMd(baseName(path)))}”.</p>`}
+        : `<p class="bl-empty">No other pages link here yet. Type <kbd>[[</kbd> in any page to link to “${esc(stripMd(baseName(path)))}”.</p>`}
     </section>
     ${data.unlinked.length ? `<details class="pl-sec">
       <summary><h3>${icon('chevron-right', 14, 2)}Unlinked mentions<span class="pl-count">${data.unlinked.length}</span></h3></summary>
@@ -1335,7 +1348,7 @@ async function openToday() {
   if (s.template) {
     try { content = (await api.note(s.template.replace(/\.md$/i, '') + '.md')).content; } catch { /* missing template */ }
   }
-  if (!content) content = '## Focus\n\n- [ ] \n\n## Notes\n\n';
+  if (!content) content = '## Focus\n\n- [ ] Most important thing today\n\n## Notes\n';
   const r = await api.create(dirName(full), baseName(full), fillTemplate(content, baseName(full)));
   await refreshTree();
   await openNote(r.path);
@@ -1647,6 +1660,37 @@ const fullPathOf = (rel) => {
   return S.vault.path.replace(/[\\/]+$/, '') + sep + rel.split('/').join(sep);
 };
 
+// ================================================================== teams
+// From the desktop/local app: leave the local vault UI and open a team server.
+async function openTeam(conn) {
+  await flushSave();
+  const back = () => {
+    if (S.vault) { $('#shell').hidden = false; $('#welcome').hidden = true; }
+    else showWelcome();
+  };
+  if (conn?.token) await startTeam(conn, { onExit: back });
+  else await showTeamSignIn({ url: conn?.url || '', onBack: back });
+}
+
+// When this UI is served by a team server, it *is* the team app.
+async function startHosted() {
+  document.body.classList.add('hosted');
+  const invite = location.hash.match(/^#\/invite\/([\w-]+)/)?.[1] || null;
+  const saved = savedTeams().find((c) => c.url === location.origin);
+  if (saved?.token) {
+    if (invite) {
+      try {
+        const r = await fetch(`/api/invites/${invite}/accept`, { method: 'POST', headers: { Authorization: `Bearer ${saved.token}` } });
+        history.replaceState(null, '', '#');
+        if (r.ok) toast('You joined the workspace', { kind: 'success' });
+      } catch { /* fall through to the app */ }
+    }
+    await startTeam(saved, { hosted: true });
+  } else {
+    await showTeamSignIn({ hosted: true, invite });
+  }
+}
+
 // ================================================================== boot
 async function boot() {
   if (window.desktop) {
@@ -1658,6 +1702,12 @@ async function boot() {
   applyPrefs();
   buildShell();
   wireGlobalKeys();
+  const teamInfo = await fetch('/api/team/info').then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (teamInfo?.version) {
+    requestAnimationFrame(() => document.body.classList.add('ready'));
+    await startHosted();
+    return;
+  }
   try {
     S.boot = await api.state();
   } catch {

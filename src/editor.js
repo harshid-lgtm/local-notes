@@ -25,6 +25,9 @@ import markPlugin from 'markdown-it-mark';
 import { Plugin, PluginKey, EditorState } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { createLowlight, common } from 'lowlight';
+import Collaboration from '@tiptap/extension-collaboration';
+import CollaborationCursor from '@tiptap/extension-collaboration-cursor';
+import { Mark } from '@tiptap/core';
 import { icon } from './icons.js';
 import { esc, h } from './ui.js';
 
@@ -540,12 +543,48 @@ const Shortcuts = Extension.create({
   },
 });
 
+// ------------------------------------------------------------------ team: comments & cursors
+// Comment anchors live in the shared document as a mark, so they move with the text for
+// everyone. They serialize to nothing, keeping the markdown clean.
+export const CommentMark = Mark.create({
+  name: 'comment',
+  inclusive: false,
+  excludes: '',
+  addAttributes() {
+    return { thread: { default: null, parseHTML: (el) => el.getAttribute('data-thread'), renderHTML: (a) => ({ 'data-thread': a.thread }) } };
+  },
+  parseHTML() { return [{ tag: 'span[data-thread]' }]; },
+  renderHTML({ HTMLAttributes }) { return ['span', mergeAttributes(HTMLAttributes, { class: 'comment-mark' }), 0]; },
+  addStorage() {
+    return { markdown: { serialize: { open: '', close: '', mixable: true, expelEnclosingWhitespace: true }, parse: {} } };
+  },
+});
+
+function renderCursor(user) {
+  const caret = document.createElement('span');
+  caret.className = 'collab-caret';
+  caret.style.setProperty('--c', user.color);
+  const label = document.createElement('span');
+  label.className = 'collab-label';
+  label.textContent = user.name;
+  caret.append(label);
+  return caret;
+}
+
 // ------------------------------------------------------------------ factory
-export function createEditor({ element, bubble, onUpdate }) {
+// `collab`: { doc, provider, user: {name, color} } turns on live co-editing (Yjs owns undo history).
+export function createEditor({ element, bubble, onUpdate, collab = null, editable = true, handleSelector = '#block-handle' }) {
+  const collabExtensions = collab ? [
+    Collaboration.configure({ document: collab.doc, field: 'default' }),
+    CollaborationCursor.configure({ provider: collab.provider, user: collab.user, render: renderCursor }),
+    CommentMark,
+  ] : [];
   const editor = new Editor({
     element,
+    editable,
     extensions: [
-      StarterKit.configure({ codeBlock: false, text: false, hardBreak: false, italic: false, dropcursor: { color: 'var(--accent)', width: 2 } }),
+      StarterKit.configure({ codeBlock: false, text: false, hardBreak: false, italic: false, history: collab ? false : undefined, dropcursor: { color: 'var(--accent)', width: 2 } }),
+      ...collabExtensions,
       GentleText, ObsidianHardBreak, TightTaskLists, AttachedLists, StyledItalic,
       Placeholder.configure({
         includeChildren: false,
@@ -566,7 +605,7 @@ export function createEditor({ element, bubble, onUpdate }) {
       WikiLink, WikiEmbed,
       Decorations,
       SlashCommand, WikiSuggest, Shortcuts,
-      GlobalDragHandle.configure({ dragHandleWidth: 24, scrollTreshold: 120, dragHandleSelector: '#block-handle' }),
+      GlobalDragHandle.configure({ dragHandleWidth: 24, scrollTreshold: 120, dragHandleSelector: handleSelector }),
       BubbleMenu.configure({
         element: bubble,
         tippyOptions: { duration: [140, 90], placement: 'top', maxWidth: 'none', offset: [0, 10], zIndex: 40, appendTo: () => document.body },
@@ -590,7 +629,7 @@ export function createEditor({ element, bubble, onUpdate }) {
         return false;
       },
     },
-    onUpdate: ({ editor: ed }) => onUpdate?.(ed),
+    onUpdate: ({ editor: ed, transaction }) => onUpdate?.(ed, transaction),
   });
   return editor;
 }
