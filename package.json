@@ -1,7 +1,7 @@
 {
   "name": "local-notes",
-  "version": "1.2.0",
-  "description": "A beautiful, Notion-style editor for your markdown notes — with wikilinks, backlinks and a graph view. Works with Obsidian vaults.",
+  "version": "1.2.1",
+  "description": "A beautiful, Notion-style editor for your markdown notes \u2014 with wikilinks, backlinks and a graph view. Works with Obsidian vaults.",
   "scripts": {
     "build": "node scripts/build.mjs",
     "start": "node server/cli.js",
@@ -70,7 +70,7 @@
   "build": {
     "appId": "io.github.harshidlgtm.localnotes",
     "productName": "Local Notes",
-    "copyright": "Copyright © 2026 Local Notes",
+    "copyright": "Copyright \u00a9 2026 Local Notes",
     "directories": {
       "output": "dist",
       "buildResources": "build"
