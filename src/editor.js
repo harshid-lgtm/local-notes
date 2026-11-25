@@ -17,6 +17,7 @@ import TableCell from '@tiptap/extension-table-cell';
 import TableHeader from '@tiptap/extension-table-header';
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
 import Highlight from '@tiptap/extension-highlight';
+import Underline from '@tiptap/extension-underline';
 import BubbleMenu from '@tiptap/extension-bubble-menu';
 import Suggestion from '@tiptap/suggestion';
 import GlobalDragHandle from './vendor/drag-handle.js';
@@ -288,12 +289,53 @@ const WikiEmbed = Node.create({
 });
 
 // ------------------------------------------------------------------ marks & nodes with markdown tweaks
+// Underline and coloured highlights have no markdown syntax, so they're stored as the small
+// bits of HTML Obsidian understands: <u>text</u> and <mark style="background: #hex;">text</mark>
+// (the format of Obsidian's Highlightr plugin). Plain yellow stays ==text==.
+const SAFE_COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\)|[a-z]+)$/i;
+function htmlMarksMarkdownIt(md) {
+  if (md.__lnHtmlMarks) return;
+  md.__lnHtmlMarks = true;
+  md.inline.ruler.after('html_inline', 'ln_html_marks', (state, silent) => {
+    if (state.src.charCodeAt(state.pos) !== 0x3c /* < */) return false;
+    const m = /^<(\/?u|\/mark|mark(?:\s+(?:style="background(?:-color)?:\s*([^";]+?);?\s*"|data-color="([^"]+)"))?)>/i.exec(state.src.slice(state.pos));
+    if (!m) return false;
+    if (!silent) {
+      const t = state.push('html_inline', '', 0);
+      const tag = m[1].toLowerCase();
+      const color = (m[2] || m[3] || '').trim();
+      t.content = tag.startsWith('mark') ? (SAFE_COLOR.test(color) ? `<mark data-color="${color}">` : '<mark>') : `<${tag}>`;
+    }
+    state.pos += m[0].length;
+    return true;
+  });
+}
+
 const MarkdownHighlight = Highlight.extend({
+  // outermost mark, like Highlightr writes it: <mark …>**bold**</mark>
+  priority: 200,
   addStorage() {
     return {
       markdown: {
-        serialize: { open: '==', close: '==', mixable: true, expelEnclosingWhitespace: true },
-        parse: { setup(md) { if (!md.__mark) { md.__mark = true; md.use(markPlugin); } } },
+        serialize: {
+          open: (_state, mark) => (mark.attrs.color ? `<mark style="background: ${mark.attrs.color};">` : '=='),
+          close: (_state, mark) => (mark.attrs.color ? '</mark>' : '=='),
+          mixable: true,
+          expelEnclosingWhitespace: true,
+        },
+        parse: { setup(md) { if (!md.__mark) { md.__mark = true; md.use(markPlugin); } htmlMarksMarkdownIt(md); } },
+      },
+    };
+  },
+}).configure({ multicolor: true });
+
+const MarkdownUnderline = Underline.extend({
+  priority: 150,
+  addStorage() {
+    return {
+      markdown: {
+        serialize: { open: '<u>', close: '</u>', mixable: true, expelEnclosingWhitespace: true },
+        parse: { setup: htmlMarksMarkdownIt },
       },
     };
   },
@@ -602,7 +644,7 @@ export function createEditor({ element, bubble, onUpdate, collab = null, editabl
       Table.configure({ resizable: false }),
       TableRow, TableHeader, TableCell,
       CodeBlock,
-      MarkdownHighlight,
+      MarkdownHighlight, MarkdownUnderline,
       WikiLink, WikiEmbed,
       Decorations,
       SlashCommand, WikiSuggest, Shortcuts,

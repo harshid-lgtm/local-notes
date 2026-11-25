@@ -8,6 +8,7 @@ import { createEditor, host, getMarkdown } from '../editor.js';
 import { icon, logo } from '../icons.js';
 import { $, h, esc, showMenu, openModal, confirmDialog, toast, store, timeAgo, modKey, copyText } from '../ui.js';
 import { mountGraph, setFolders, folderColor } from '../graph.js';
+import { formatButtons, runFormat, syncFormat } from '../format.js';
 import { teamClient, normalizeUrl, saveTeam, forgetTeam, savedTeams } from './client.js';
 import { setAITransport, resetAITransport, setAIHooks, forgetAIStatus, openAIMenu, openWritePanel, summarizePage, toggleAskPanel, openAISettings, closeAskPanel } from '../ai/ai.js';
 
@@ -1045,11 +1046,8 @@ function buildBubble(c) {
     <span class="bb-sep"></span>
     <button data-cmd="comment" class="bb-comment" title="Comment (${modKey}+Alt+M)">${icon('note', 16, 2)}<span class="bb-text">Comment</span></button>
     <span class="bb-sep"></span>
-    <button data-cmd="bold" title="Bold">${icon('bold', 16, 2.2)}</button>
-    <button data-cmd="italic" title="Italic">${icon('italic', 16, 2)}</button>
-    <button data-cmd="strike" title="Strikethrough">${icon('strike', 16, 2)}</button>
-    <button data-cmd="code" title="Inline code">${icon('code', 16, 2)}</button>
-    <button data-cmd="highlight" title="Highlight">${icon('highlight', 16, 2)}</button>
+    ${formatButtons(modKey)}
+    <span class="bb-sep"></span>
     <button data-cmd="link" title="Link">${icon('link', 16, 2)}</button>
   </div>`);
   el.addEventListener('mousedown', (e) => e.preventDefault());
@@ -1057,14 +1055,10 @@ function buildBubble(c) {
     const b = e.target.closest('[data-cmd]');
     if (!b) return;
     const ch = c.editor.chain().focus();
+    if (runFormat(c.editor, b.dataset.cmd, b)) { syncBubble(c); return; }
     switch (b.dataset.cmd) {
       case 'comment': startComment(); break;
       case 'ai': openAIMenu(c.editor, b); break;
-      case 'bold': ch.toggleBold().run(); break;
-      case 'italic': ch.toggleItalic().run(); break;
-      case 'strike': ch.toggleStrike().run(); break;
-      case 'code': ch.toggleCode().run(); break;
-      case 'highlight': ch.toggleHighlight().run(); break;
       case 'link': {
         const href = prompt('Link address', c.editor.getAttributes('link').href || 'https://');
         if (href === null) break;
@@ -1079,7 +1073,8 @@ function buildBubble(c) {
 }
 
 function syncBubble(c) {
-  for (const k of ['bold', 'italic', 'strike', 'code', 'highlight', 'link']) c.bubble.querySelector(`[data-cmd="${k}"]`)?.classList.toggle('on', c.editor.isActive(k));
+  syncFormat(c.editor, c.bubble);
+  c.bubble.querySelector('[data-cmd="link"]')?.classList.toggle('on', c.editor.isActive('link'));
   const commentBtn = c.bubble.querySelector('[data-cmd="comment"]');
   commentBtn.hidden = c.role === 'viewer';
   c.bubble.querySelectorAll('[data-cmd]:not([data-cmd="comment"]), .bb-sep').forEach((b) => { b.hidden = c.role === 'viewer'; });

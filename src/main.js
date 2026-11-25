@@ -7,6 +7,7 @@ import { icon, logo } from './icons.js';
 import { $, h, esc, showMenu, closeMenu, place, openModal, confirmDialog, toast, store, timeAgo, modKey, copyText } from './ui.js';
 import { createEditor, loadMarkdown, getMarkdown, host, sniffStyle } from './editor.js';
 import { Selection } from '@tiptap/pm/state';
+import { formatButtons, runFormat, syncFormat } from './format.js';
 import { mountGraph, folderColor, setFolders } from './graph.js';
 import { showTeamSignIn, startTeam } from './team/team.js';
 import { savedTeams } from './team/client.js';
@@ -1029,11 +1030,7 @@ function buildBubble() {
     <span class="bb-sep"></span>
     <button class="bb-turn" data-cmd="turn"><span class="bb-turn-label">Text</span>${icon('chevron-down', 13, 2)}</button>
     <span class="bb-sep"></span>
-    <button data-cmd="bold" title="Bold (${modKey}+B)">${icon('bold', 16, 2.2)}</button>
-    <button data-cmd="italic" title="Italic (${modKey}+I)">${icon('italic', 16, 2)}</button>
-    <button data-cmd="strike" title="Strikethrough">${icon('strike', 16, 2)}</button>
-    <button data-cmd="code" title="Inline code (${modKey}+E)">${icon('code', 16, 2)}</button>
-    <button data-cmd="highlight" title="Highlight (${modKey}+Shift+H)">${icon('highlight', 16, 2)}</button>
+    ${formatButtons(modKey)}
     <span class="bb-sep"></span>
     <button data-cmd="link" title="Link">${icon('link', 16, 2)}<span class="bb-text">Link</span></button>
     <form class="bb-link" hidden><input placeholder="Paste a link or page name…" spellcheck="false"><button type="button" data-cmd="unlink" title="Remove link">${icon('unlink', 15)}</button></form>
@@ -1050,12 +1047,8 @@ function buildBubble() {
     const b = e.target.closest('[data-cmd]');
     if (!b) return;
     const c = editor.chain().focus();
+    if (runFormat(editor, b.dataset.cmd, b)) { syncBubble(); return; }
     switch (b.dataset.cmd) {
-      case 'bold': c.toggleBold().run(); break;
-      case 'italic': c.toggleItalic().run(); break;
-      case 'strike': c.toggleStrike().run(); break;
-      case 'code': c.toggleCode().run(); break;
-      case 'highlight': c.toggleHighlight().run(); break;
       case 'link': showLink(true); break;
       case 'unlink': c.extendMarkRange('link').unsetLink().run(); showLink(false); break;
       case 'turn': turnIntoMenu(b); break;
@@ -1105,9 +1098,8 @@ function turnIntoMenu(anchor) {
 function syncBubble() {
   const el = $('.bubble');
   if (!el) return;
-  for (const k of ['bold', 'italic', 'strike', 'code', 'highlight', 'link']) {
-    el.querySelector(`[data-cmd="${k}"]`)?.classList.toggle('on', editor.isActive(k));
-  }
+  syncFormat(editor, el);
+  el.querySelector('[data-cmd="link"]')?.classList.toggle('on', editor.isActive('link'));
   const cur = TURN.slice(1).find(([, , , active]) => active(editor));
   $('.bb-turn-label', el).textContent = cur ? cur[0] : 'Text';
 }
