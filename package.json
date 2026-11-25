@@ -1,6 +1,6 @@
 {
   "name": "local-notes",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "A beautiful, Notion-style editor for your markdown notes \u2014 with wikilinks, backlinks and a graph view. Works with Obsidian vaults.",
   "scripts": {
     "build": "node scripts/build.mjs",
