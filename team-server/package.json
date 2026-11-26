@@ -1,6 +1,6 @@
 {
   "name": "local-notes-team-server",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Self-hosted team server for Local Notes: accounts, shared workspaces, live co-editing, history and comments.",
   "main": "src/index.js",
