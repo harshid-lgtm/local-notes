@@ -56,6 +56,22 @@ TEAM_NAME="Acme" npm start        # http://localhost:3000
 
 Put it behind any HTTPS reverse proxy that supports WebSockets.
 
+## Reset a forgotten password
+
+On the server, run this from the `team-server` folder and type the new password when asked (it isn't shown):
+
+```bash
+node src/reset-password.js you@example.com
+```
+
+With Docker:
+
+```bash
+docker compose exec -it notes node src/reset-password.js you@example.com
+```
+
+Set `DATA_DIR` first if your data folder isn't next to the server. The person is signed out on their other devices.
+
 ## Security notes
 
 - Always run behind HTTPS.
