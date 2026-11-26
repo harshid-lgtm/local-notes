@@ -4,3 +4,4 @@ __pycache__/
 *.log
 team-server/data/
 site/docs/
+team-bundle/

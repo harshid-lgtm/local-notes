@@ -9,7 +9,10 @@ import { openDb } from './db.js';
 import { createApi, json, HttpError } from './api.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const pkg = JSON.parse(fs.readFileSync(path.join(here, '..', 'package.json'), 'utf8'));
+let pkg = { version: process.env.LN_VERSION || '' };
+for (const p of [path.join(here, '..', 'package.json'), path.join(here, 'package.json')]) {
+  try { const j = JSON.parse(fs.readFileSync(p, 'utf8')); if (j.version) { pkg = j; break; } } catch { /* bundled: try the next place */ }
+}
 
 const config = {
   port: Number(process.env.PORT || 3000),
@@ -19,6 +22,7 @@ const config = {
   name: process.env.TEAM_NAME || 'Team',
   signup: process.env.SIGNUP === 'open' ? 'open' : 'invite',
   mirror: process.env.MIRROR !== 'false',
+  publicUrl: (process.env.PUBLIC_URL || '').replace(/\/+$/, ''), // e.g. https://notes.example.com, used in shared links
   aiRate: Number(process.env.AI_RATE_LIMIT || 60), // AI requests per person per 10 minutes
   version: pkg.version,
 };
@@ -32,6 +36,12 @@ const collab = {
       for (const conn of doc.getConnections()) {
         if (conn.context?.user?.id === userId && conn.context?.workspaceId === workspaceId) recheck(conn);
       }
+    }
+  },
+  // suspended account: drop every live connection
+  kickUser(userId) {
+    for (const doc of server?.hocuspocus.documents.values() || []) {
+      for (const conn of doc.getConnections()) if (conn.context?.user?.id === userId) conn.close();
     }
   },
   // Access to these pages changed: re-check everyone connected. People who lost access are
@@ -137,8 +147,20 @@ server = new Server({
   },
 });
 
-await server.listen();
+try {
+  // Hocuspocus reports listen errors as an 'error' event, so turn them into a rejection.
+  await new Promise((resolve, reject) => {
+    server.httpServer.once('error', reject);
+    server.listen().then(resolve, reject);
+  });
+} catch (e) {
+  const msg = e?.code === 'EADDRINUSE' ? `Port ${config.port} is already in use by another program.` : e?.code === 'EACCES' ? `Not allowed to use port ${config.port}.` : (e?.message || String(e));
+  console.error(`\n  Couldn't start: ${msg}\n`);
+  process.parentPort?.postMessage({ type: 'error', message: msg });
+  process.exit(1);
+}
+process.parentPort?.postMessage({ type: 'ready', port: config.port });
 console.log(`\n  Local Notes team server ${config.version}`);
 console.log(`  Listening on http://${config.host}:${config.port}`);
 console.log(`  Data: ${config.dataDir}`);
-console.log(`  Sign-up: ${config.signup === 'open' ? 'open to anyone' : 'first user, then invite links only'}\n`);
+console.log(`  Sign-up: ${!api.db.get('SELECT 1 AS x FROM users LIMIT 1') ? 'not set up yet: open the address above to create the admin account' : config.signup === 'open' ? 'open to anyone who can reach this server' : 'invite links only'}\n`);

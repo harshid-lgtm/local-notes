@@ -4,7 +4,18 @@ Self-hosted server for Local Notes teams: accounts, shared workspaces, a private
 
 Everything lives in one data folder: a SQLite database plus a **markdown mirror** of every page (`/data/vault`), laid out exactly like a Local Notes / Obsidian vault.
 
-## Deploy with Docker (recommended)
+## Easiest ways to run it
+
+- **From the desktop app (Windows, Mac, Linux):** vault menu → **Host a team server on this computer** → **Start hosting**.
+- **On a Linux server, one command:**
+
+  ```bash
+  curl -fsSL https://harshid-lgtm.github.io/local-notes/install.sh | bash
+  ```
+
+Either way, open the address it shows and the setup wizard creates the admin account. Full guide: [Setting up a team server](https://harshid-lgtm.github.io/local-notes/docs/self-hosting.html).
+
+## Deploy with Docker (HTTPS on your own domain)
 
 You need a small Linux server (1 GB RAM is plenty for a team) with Docker, and a domain name.
 
@@ -16,7 +27,7 @@ You need a small Linux server (1 GB RAM is plenty for a team) with Docker, and a
    docker compose up -d
    ```
 
-3. Open `https://notes.yourcompany.com`. The first person to sign up becomes the admin and gets a shared workspace named after `TEAM_NAME`.
+3. Open `https://notes.yourcompany.com` and follow the setup wizard: name your team, create the admin account and choose who can join.
 4. Click **Share** on a workspace to create invite links for teammates.
 
 Caddy fetches and renews the HTTPS certificate automatically.

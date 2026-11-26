@@ -1,15 +1,17 @@
 // REST API for the team server. JSON in/out, Bearer-token auth.
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { newId, now } from './db.js';
 import { hashPassword, checkPassword, newToken, hashToken, pickColor, rateLimit } from './auth.js';
 import { subscribe, sendTo } from './events.js';
-import { createRequire } from 'node:module';
 import Anthropic from '@anthropic-ai/sdk';
+import aiLib from '../../server/ai.js';
 
 // The provider layer is shared with the desktop app (server/ai.js in the repository).
-const aiLib = createRequire(import.meta.url)('../../server/ai.js');
 const aiClient = aiLib.createAI({ Anthropic });
+
+const VIRTUAL_NIC = /^(vEthernet|vmnet|VMware|VirtualBox|docker|br-|veth|virbr|tailscale|utun|zt|Hyper-V|WSL|lxc|lxd|podman)|Virtual|Loopback|Pseudo/i;
 
 export class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -37,8 +39,43 @@ export function createApi({ db, config, collab }) {
   // used by the collaboration hooks
   const userForToken = (token) => {
     const s = token && db.get('SELECT * FROM sessions WHERE token = ?', hashToken(token));
-    return s ? userById(s.user_id) : null;
+    const u = s ? userById(s.user_id) : null;
+    if (!u || u.disabled_at) return null;
+    if (now() - s.last_seen > 3600e3) db.run('UPDATE sessions SET last_seen = ? WHERE token = ?', now(), s.token);
+    return u;
   };
+
+  // Server settings chosen in the setup wizard / admin console override the environment defaults.
+  const SETTINGS_KEY = 'server';
+  const loadServerSettings = () => { try { return JSON.parse(db.get('SELECT value FROM settings WHERE key = ?', SETTINGS_KEY)?.value || '{}'); } catch { return {}; } };
+  function saveServerSettings(patch) {
+    const next = { ...loadServerSettings(), ...patch };
+    db.run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', SETTINGS_KEY, JSON.stringify(next));
+    Object.assign(config, next);
+  }
+  Object.assign(config, loadServerSettings());
+  // This machine's addresses on the local network, so links shared from "localhost" still work for teammates.
+  function lanAddresses() {
+    if (config.publicUrl) return [config.publicUrl];
+    const out = [];
+    for (const [name, list] of Object.entries(os.networkInterfaces())) {
+      if (VIRTUAL_NIC.test(name)) continue; // WSL, Hyper-V, Docker, VPN tunnels
+      for (const a of list || []) if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.')) out.push(`http://${a.address}:${config.port}`);
+    }
+    return out.sort((a, b) => (/\/\/(192\.168|10\.)/.test(b) ? 1 : 0) - (/\/\/(192\.168|10\.)/.test(a) ? 1 : 0));
+  }
+  const hasUsers = () => !!db.get('SELECT 1 AS x FROM users LIMIT 1');
+  const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e);
+
+  // One-time links to set a password: for new accounts an admin adds, and for password resets.
+  function passwordLink(userId, kind, createdBy, days) {
+    const token = newToken();
+    db.run('DELETE FROM password_links WHERE user_id = ?', userId);
+    db.run('INSERT INTO password_links (token, user_id, kind, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+      hashToken(token), userId, kind, createdBy, now(), now() + days * 86400e3);
+    return token;
+  }
+  const linkFor = (token) => db.get('SELECT * FROM password_links WHERE token = ? AND expires_at > ?', hashToken(String(token || '')), now());
 
   const roleIn = (userId, wsId) => db.get('SELECT role FROM members WHERE workspace_id = ? AND user_id = ?', wsId, userId)?.role || null;
   function requireRole(user, wsId, min = 'viewer') {
@@ -72,7 +109,7 @@ export function createApi({ db, config, collab }) {
     if (wsRole && restrictedBy.created_by === userId) return best(wsRole === 'viewer' ? 'editor' : wsRole, shareRole);
     return shareRole;
   }
-  const pageRole = (userId, pageId) => { const p = pageById(pageId); return p && !p.deleted_at ? accessFor(userId, p) : null; };
+  const pageRole = (userId, pageId) => { const p = pageById(pageId); return p && !p.deleted_at && !userById(userId)?.disabled_at ? accessFor(userId, p) : null; };
   const canManage = (userId, page, role = accessFor(userId, page)) => role === 'owner' || (role === 'editor' && chainOf(page).some((p) => p.created_by === userId));
 
   function pageFor(user, pageId, min = 'viewer') {
@@ -258,16 +295,64 @@ export function createApi({ db, config, collab }) {
   route('GET', '/api/team/info', () => ({
     name: config.name,
     version: config.version,
-    hasUsers: !!db.get('SELECT 1 AS x FROM users LIMIT 1'),
+    hasUsers: hasUsers(),
+    needsSetup: !hasUsers(),
     signup: config.signup,
   }), { public: true });
+
+  // First-run setup: creates the admin account, names the team and picks who can join.
+  route('POST', '/api/setup', ({ body, req }) => {
+    if (!rateLimit(`setup:${req.socket.remoteAddress}`, 20)) fail(429, 'Too many attempts. Try again in a few minutes.');
+    if (hasUsers()) fail(409, 'This server is already set up. Sign in instead.');
+    const teamName = String(body.teamName || '').trim().slice(0, 80);
+    const email = String(body.email || '').trim().toLowerCase();
+    const name = String(body.name || '').trim().slice(0, 80);
+    const pw = String(body.password || '');
+    if (!teamName) fail(400, 'Give your team a name');
+    if (!name) fail(400, 'Enter your name');
+    if (!validEmail(email)) fail(400, 'Enter a valid email address');
+    if (pw.length < 8) fail(400, 'Use at least 8 characters for your password');
+    const user = db.tx(() => {
+      saveServerSettings({ name: teamName, signup: body.signup === 'open' ? 'open' : 'invite' });
+      const id = newId(9);
+      db.run('INSERT INTO users (id, email, name, pw, color, is_admin, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)', id, email, name, hashPassword(pw), pickColor(id), now());
+      const u = userById(id);
+      const priv = createWorkspace(u, 'Private', 'private');
+      addPage(priv, u, { title: 'Getting started', markdown: GETTING_STARTED });
+      const team = createWorkspace(u, teamName);
+      addPage(team, u, { title: 'Team home', markdown: TEAM_HOME });
+      return u;
+    });
+    return { token: createSession(user), user: userPublic(user) };
+  }, { public: true });
+
+  // Set a password from a one-time link (new account or reset).
+  route('GET', '/api/auth/password-link/:token', ({ params }) => {
+    const l = linkFor(params.token);
+    if (!l) fail(404, 'This link has expired or was already used. Ask your admin for a new one.');
+    const u = userById(l.user_id);
+    return { name: u.name, email: u.email, kind: l.kind, team: config.name };
+  }, { public: true });
+  route('POST', '/api/auth/password-link/:token', ({ params, body, req }) => {
+    if (!rateLimit(`pwlink:${req.socket.remoteAddress}`, 20)) fail(429, 'Too many attempts. Try again in a few minutes.');
+    const l = linkFor(params.token);
+    if (!l) fail(404, 'This link has expired or was already used. Ask your admin for a new one.');
+    const pw = String(body.password || '');
+    if (pw.length < 8) fail(400, 'Use at least 8 characters for your password');
+    db.run('UPDATE users SET pw = ? WHERE id = ?', hashPassword(pw), l.user_id);
+    db.run('DELETE FROM sessions WHERE user_id = ?', l.user_id);
+    db.run('DELETE FROM password_links WHERE user_id = ?', l.user_id);
+    const u = userById(l.user_id);
+    if (u.disabled_at) fail(403, 'Your account is suspended. Contact your admin.');
+    return { token: createSession(u), user: userPublic(u) };
+  }, { public: true });
 
   route('POST', '/api/auth/signup', ({ body, req }) => {
     if (!rateLimit(`signup:${req.socket.remoteAddress}`, 20)) fail(429, 'Too many attempts. Try again in a few minutes.');
     const email = String(body.email || '').trim().toLowerCase();
     const name = String(body.name || '').trim().slice(0, 80);
     const pw = String(body.password || '');
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) fail(400, 'Enter a valid email address');
+    if (!validEmail(email)) fail(400, 'Enter a valid email address');
     if (!name) fail(400, 'Enter your name');
     if (pw.length < 8) fail(400, 'Use at least 8 characters for your password');
     const first = !db.get('SELECT 1 AS x FROM users LIMIT 1');
@@ -278,6 +363,7 @@ export function createApi({ db, config, collab }) {
       const id = newId(9);
       db.run('INSERT INTO users (id, email, name, pw, color, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
         id, email, name, hashPassword(pw), pickColor(id), first ? 1 : 0, now());
+      if (first && body.teamName) saveServerSettings({ name: String(body.teamName).trim().slice(0, 80) });
       const u = userById(id);
       const priv = createWorkspace(u, 'Private', 'private');
       addPage(priv, u, { title: 'Getting started', markdown: GETTING_STARTED });
@@ -296,6 +382,7 @@ export function createApi({ db, config, collab }) {
     if (!rateLimit(`login:${email}`, 10) || !rateLimit(`login-ip:${req.socket.remoteAddress}`, 40)) fail(429, 'Too many attempts. Try again in a few minutes.');
     const u = db.get('SELECT * FROM users WHERE email = ?', email);
     if (!u || !checkPassword(String(body.password || ''), u.pw)) fail(401, 'Wrong email or password');
+    if (u.disabled_at) fail(403, 'Your account is suspended. Contact your admin.');
     if (body.invite) {
       const inv = db.get('SELECT * FROM invites WHERE token = ? AND expires_at > ?', body.invite, now());
       if (inv) acceptInvite(u, inv);
@@ -313,7 +400,7 @@ export function createApi({ db, config, collab }) {
     const workspaces = db.all(`SELECT w.id, w.name, w.kind, m.role, (SELECT COUNT(*) FROM members x WHERE x.workspace_id = w.id) AS members
       FROM members m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = ? ORDER BY w.kind = 'private' DESC, w.created_at`, user.id);
     const unread = db.get('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL', user.id).n;
-    return { user: userPublic(user), workspaces, unread };
+    return { user: userPublic(user), workspaces, unread, server: { addresses: lanAddresses() } };
   });
 
   route('PATCH', '/api/me', ({ user, body }) => {
@@ -800,12 +887,119 @@ export function createApi({ db, config, collab }) {
     return { ok: true, page: pagePublic(pageById(page.id)) };
   });
 
+  // ---------------------------------------------------------------- server admin console
+  const requireServerAdmin = (user) => { if (!user.is_admin) fail(403, 'Only server admins can do that'); };
+  const adminCount = () => db.get('SELECT COUNT(*) AS n FROM users WHERE is_admin = 1 AND disabled_at IS NULL').n;
+  const adminUser = (u) => ({
+    ...userPublic(u),
+    disabled: !!u.disabled_at,
+    createdAt: u.created_at,
+    lastSeen: db.get('SELECT MAX(last_seen) AS t FROM sessions WHERE user_id = ?', u.id)?.t || null,
+    workspaces: db.all("SELECT w.name, m.role FROM members m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = ? AND w.kind = 'team' ORDER BY w.name", u.id),
+    pendingSetup: !!db.get("SELECT 1 AS x FROM password_links WHERE user_id = ? AND kind = 'welcome' AND expires_at > ?", u.id, now()),
+  });
+
+  route('GET', '/api/admin/overview', ({ user }) => {
+    requireServerAdmin(user);
+    return {
+      settings: { name: config.name, signup: config.signup },
+      version: config.version,
+      dataDir: config.dataDir,
+      addresses: lanAddresses(),
+      users: db.all('SELECT * FROM users ORDER BY disabled_at IS NOT NULL, name').map(adminUser),
+      workspaces: db.all("SELECT * FROM workspaces WHERE kind = 'team' ORDER BY name").map((w) => ({
+        id: w.id, name: w.name, createdAt: w.created_at,
+        members: db.get('SELECT COUNT(*) AS n FROM members WHERE workspace_id = ?', w.id).n,
+        pages: db.get('SELECT COUNT(*) AS n FROM pages WHERE workspace_id = ? AND deleted_at IS NULL', w.id).n,
+        owners: db.all("SELECT u.name FROM members m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = ? AND m.role = 'owner' ORDER BY u.name", w.id).map((r) => r.name),
+        myRole: roleIn(user.id, w.id),
+      })),
+    };
+  });
+
+  route('PATCH', '/api/admin/settings', ({ user, body }) => {
+    requireServerAdmin(user);
+    const patch = {};
+    if (body.name !== undefined) {
+      const name = String(body.name).trim().slice(0, 80);
+      if (!name) fail(400, 'Give the server a name');
+      patch.name = name;
+    }
+    if (body.signup !== undefined) patch.signup = body.signup === 'open' ? 'open' : 'invite';
+    saveServerSettings(patch);
+    return { settings: { name: config.name, signup: config.signup } };
+  });
+
+  // Add a person directly: creates the account and returns a link for them to choose a password.
+  route('POST', '/api/admin/users', ({ user, body }) => {
+    requireServerAdmin(user);
+    const email = String(body.email || '').trim().toLowerCase();
+    const name = String(body.name || '').trim().slice(0, 80);
+    if (!name) fail(400, 'Enter their name');
+    if (!validEmail(email)) fail(400, 'Enter a valid email address');
+    if (db.get('SELECT 1 AS x FROM users WHERE email = ?', email)) fail(409, 'Someone with that email already has an account');
+    const role = ROLES.includes(body.role) ? body.role : 'editor';
+    const wsIds = (Array.isArray(body.workspaceIds) ? body.workspaceIds : []).filter((id) => db.get("SELECT 1 AS x FROM workspaces WHERE id = ? AND kind = 'team'", id));
+    const { u, token } = db.tx(() => {
+      const id = newId(9);
+      db.run('INSERT INTO users (id, email, name, pw, color, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        id, email, name, hashPassword(newToken()), pickColor(id), body.isAdmin ? 1 : 0, now());
+      const nu = userById(id);
+      const priv = createWorkspace(nu, 'Private', 'private');
+      addPage(priv, nu, { title: 'Getting started', markdown: GETTING_STARTED });
+      for (const ws of wsIds) db.run('INSERT OR IGNORE INTO members (workspace_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)', ws, id, role, now());
+      return { u: nu, token: passwordLink(id, 'welcome', user.id, 14) };
+    });
+    for (const ws of wsIds) broadcast(ws, { type: 'members' });
+    return { user: adminUser(u), token };
+  });
+
+  route('PATCH', '/api/admin/users/:id', ({ user, params, body }) => {
+    requireServerAdmin(user);
+    const target = userById(params.id);
+    if (!target) fail(404, 'Person not found');
+    if (body.isAdmin !== undefined) {
+      if (!body.isAdmin && target.is_admin && adminCount() <= 1) fail(400, 'The server needs at least one admin. Make someone else an admin first.');
+      db.run('UPDATE users SET is_admin = ? WHERE id = ?', body.isAdmin ? 1 : 0, target.id);
+    }
+    if (body.disabled !== undefined) {
+      if (target.id === user.id) fail(400, 'You can’t suspend your own account');
+      if (body.disabled && target.is_admin && adminCount() <= 1) fail(400, 'The server needs at least one admin.');
+      db.run('UPDATE users SET disabled_at = ? WHERE id = ?', body.disabled ? now() : null, target.id);
+      if (body.disabled) {
+        db.run('DELETE FROM sessions WHERE user_id = ?', target.id);
+        for (const m of db.all('SELECT workspace_id FROM members WHERE user_id = ?', target.id)) collab.kick(target.id, m.workspace_id);
+        collab.kickUser?.(target.id);
+      }
+    }
+    return { user: adminUser(userById(target.id)) };
+  });
+
+  route('POST', '/api/admin/users/:id/password-link', ({ user, params }) => {
+    requireServerAdmin(user);
+    const target = userById(params.id);
+    if (!target) fail(404, 'Person not found');
+    const pending = db.get("SELECT 1 AS x FROM password_links WHERE user_id = ? AND kind = 'welcome' AND expires_at > ?", target.id, now());
+    return { token: passwordLink(target.id, pending ? 'welcome' : 'reset', user.id, pending ? 14 : 2) };
+  });
+
+  // Join a workspace as owner (e.g. one whose owners have left).
+  route('POST', '/api/admin/workspaces/:id/join', ({ user, params }) => {
+    requireServerAdmin(user);
+    const ws = db.get("SELECT * FROM workspaces WHERE id = ? AND kind = 'team'", params.id);
+    if (!ws) fail(404, 'Workspace not found');
+    if (roleIn(user.id, ws.id)) db.run("UPDATE members SET role = 'owner' WHERE workspace_id = ? AND user_id = ?", ws.id, user.id);
+    else db.run("INSERT INTO members (workspace_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)", ws.id, user.id, now());
+    broadcast(ws.id, { type: 'members' });
+    return { ok: true };
+  });
+
   route('GET', '/api/events', ({ user, res }) => { subscribe(user.id, res); return undefined; }, { stream: true });
 
   // ---------------------------------------------------------------- AI (admin picks the provider; members use it)
   const aiSettings = () => { try { return JSON.parse(db.get("SELECT value FROM settings WHERE key = 'ai'")?.value || '{}'); } catch { return {}; } };
   const saveAISettings = (v) => db.run("INSERT INTO settings (key, value) VALUES ('ai', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify(v));
-  const requireAdmin = (user) => { if (!user.is_admin) fail(403, 'Only the server admin can change AI settings'); };
+  const requireAdmin = (user) => { if (!user.is_admin) fail(403, 'Only server admins can change AI settings'); };
   const override = (b = {}) => Object.fromEntries(['provider', 'apiKey', 'baseUrl', 'model'].filter((k) => b[k]).map((k) => [k, b[k]]));
   const aiFail = (e) => fail(e.status || 502, e.message);
 

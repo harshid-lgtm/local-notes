@@ -11,6 +11,7 @@ import { formatButtons, runFormat, syncFormat } from './format.js';
 import { mountGraph, folderColor, setFolders } from './graph.js';
 import { showTeamSignIn, startTeam } from './team/team.js';
 import { savedTeams } from './team/client.js';
+import { canHost, openHostDialog } from './team/host.js';
 import { openAIMenu, openWritePanel, summarizePage, toggleAskPanel, openAISettings, setAIHooks, closeAskPanel } from './ai/ai.js';
 
 // ================================================================== state
@@ -210,6 +211,7 @@ function showWelcome() {
         </div>
         <div class="wl-hint">Works great with your existing Obsidian vault</div>
         <button class="wl-team" id="wl-team">${icon('library', 16)}<span>Working with a team? <b>Connect to a team server</b></span>${icon('arrow-right', 15)}</button>
+        ${canHost() ? `<button class="link-btn wl-host" id="wl-host">${icon('drive', 14)}<span>No server yet? Host one on this computer</span></button>` : ''}
       </div>
       ${recent.length || obsidianOnly.length || savedTeams().length ? `<div class="wl-card">
         ${list('Recent vaults', recent, 'arrow-right')}
@@ -229,6 +231,7 @@ function showWelcome() {
   w.querySelectorAll('.vault-row[data-path]').forEach((b) => (b.onclick = () => chooseVault(b.dataset.path)));
   w.querySelectorAll('.vault-row[data-team]').forEach((b) => (b.onclick = () => openTeam(savedTeams().find((c) => c.url === b.dataset.team))));
   $('#wl-team').onclick = () => openTeam(null);
+  $('#wl-host')?.addEventListener('click', () => openHostDialog({ openTeam }));
 }
 
 function hue(s) {
@@ -716,6 +719,7 @@ function vaultMenu(anchor) {
     { header: 'Team servers' },
     ...savedTeams().map((c) => ({ label: c.url.replace(/^https?:\/\//, ''), icon: 'library', run: () => openTeam(c) })),
     { label: 'Connect to a team server…', icon: 'library', run: () => openTeam(null) },
+    ...(canHost() ? [{ label: 'Host a team server on this computer…', icon: 'drive', run: () => openHostDialog({ openTeam }) }] : []),
     { label: 'Copy vault path', icon: 'copy', run: () => copy(S.vault.display, 'Path copied') },
     { label: 'AI settings…', icon: 'sparkles', run: () => openAISettings() },
     'sep',
@@ -1698,6 +1702,8 @@ async function openTeam(conn) {
 async function startHosted() {
   document.body.classList.add('hosted');
   const invite = location.hash.match(/^#\/invite\/([\w-]+)/)?.[1] || null;
+  const passwordToken = location.hash.match(/^#\/password\/([\w-]+)/)?.[1] || null;
+  if (passwordToken) return showTeamSignIn({ hosted: true, passwordToken });
   const saved = savedTeams().find((c) => c.url === location.origin);
   if (saved?.token) {
     if (invite) {

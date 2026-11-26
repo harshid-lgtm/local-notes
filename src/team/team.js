@@ -19,8 +19,9 @@ const avatar = (u, size = 24) => `<span class="avatar" style="--c:${esc(u?.color
 const ROLE_LABEL = { owner: 'Owner', editor: 'Can edit', viewer: 'Can view' };
 
 // ================================================================== sign in
-export async function showTeamSignIn({ hosted = false, url = '', invite = null, onBack = null } = {}) {
+export async function showTeamSignIn({ hosted = false, url = '', invite = null, onBack = null, passwordToken = null } = {}) {
   const root = mountRoot();
+  if (passwordToken) return showPasswordLink({ root, hosted, url, token: passwordToken, onBack });
   let info = null;
   let mode = 'login';
   const serverUrl = () => (hosted ? location.origin : normalizeUrl($('[name=server]', root)?.value || url));
@@ -31,7 +32,7 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
     if (!base) return render();
     try {
       info = await teamClient({ url: base }).get('/api/team/info');
-      if (!info.hasUsers) mode = 'signup';
+      if (!info.hasUsers) return showSetup({ root, hosted, base, onBack });
       if (invite) {
         try { info.invite = await teamClient({ url: base }).get(`/api/invites/${invite}`); mode = 'signup'; } catch (e) { info.inviteError = e.message; }
       }
@@ -68,12 +69,14 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
             <button class="btn primary large auth-submit" type="submit">${mode === 'signup' ? (first ? 'Create admin account' : 'Create account') : 'Sign in'}</button>
           </form>
           ${first ? '' : `<div class="auth-switch">${mode === 'signup' ? 'Already have an account?' : 'New here?'} <button class="link-btn" data-mode>${mode === 'signup' ? 'Sign in' : 'Create an account'}</button></div>`}
+          ${mode === 'login' && info && !info.error ? '<div class="auth-switch subtle"><button class="link-btn" data-forgot>Forgot your password?</button></div>' : ''}
         </div>
         <p class="auth-foot">${icon('info', 14)}<span>Your private space is only visible to you. Team workspaces are shared with the people you invite.</span></p>
       </div>`;
     for (const [k, v] of Object.entries(kept)) { const i = $(`.auth-form [name=${k}]`, root); if (i && k !== 'server') i.value = v; }
     $('[data-mode]', root)?.addEventListener('click', () => { mode = mode === 'signup' ? 'login' : 'signup'; render(); });
     $('.auth-back', root)?.addEventListener('click', () => { root.remove(); onBack(); });
+    $('[data-forgot]', root)?.addEventListener('click', () => toast('Ask an admin of this server to send you a password reset link (Server admin → People).', { timeout: 9000 }));
     const srv = $('[name=server]', root);
     srv?.addEventListener('change', () => { url = srv.value; loadInfo(); });
     $('.auth-form', root).addEventListener('submit', async (e) => {
@@ -102,6 +105,114 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
   if (hosted || url) loadInfo();
 }
 
+const authShell = (inner, { onBack } = {}) => `
+  <div class="wl-bg" aria-hidden="true"><div class="wl-glow"></div><div class="wl-grid"></div></div>
+  <div class="auth">
+    ${onBack ? `<button class="auth-back btn ghost small">${icon('arrow-right', 15)}<span>Back to local notes</span></button>` : ''}
+    <div class="auth-card pop">${inner}</div>
+  </div>`;
+
+// First run on a new server: name the team, create the admin account, choose who can join.
+function showSetup({ root, hosted, base, onBack }) {
+  const v = { teamName: '', name: '', email: '', password: '', signup: 'invite' };
+  let step = 0;
+  const steps = ['Team', 'Admin', 'Access'];
+  const render = () => {
+    root.innerHTML = authShell(`
+      <div class="auth-logo">${logo(48)}</div>
+      <h1>Set up your team server</h1>
+      <p class="auth-sub">${hosted ? '' : `<b>${esc(base.replace(/^https?:\/\//, ''))}</b> · `}Three quick steps. You can change all of this later.</p>
+      <ol class="setup-steps">${steps.map((t, i) => `<li class="${i < step ? 'done' : i === step ? 'on' : ''}"><i>${i < step ? icon('check', 12, 2.6) : i + 1}</i><span>${t}</span></li>`).join('')}</ol>
+      <form class="auth-form setup-form" novalidate>
+        ${step === 0 ? `<label class="field"><span>Team or company name</span><input name="teamName" placeholder="Navgold, Acme Design, Marketing…" value="${esc(v.teamName)}"></label>
+          <p class="setup-hint">This becomes your first shared workspace. People see it when they sign in.</p>` : ''}
+        ${step === 1 ? `<label class="field"><span>Your name</span><input name="name" autocomplete="name" placeholder="Maya Chen" value="${esc(v.name)}"></label>
+          <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" placeholder="you@company.com" value="${esc(v.email)}"></label>
+          <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" value="${esc(v.password)}"></label>
+          <p class="setup-hint">${icon('lock', 13)}This is the server admin account. Admins add people, reset passwords and choose settings.</p>` : ''}
+        ${step === 2 ? `<div class="choice-list">
+            <label class="choice ${v.signup === 'invite' ? 'on' : ''}"><input type="radio" name="signup" value="invite" ${v.signup === 'invite' ? 'checked' : ''}>
+              <span class="choice-ic">${icon('lock', 18)}</span><span><strong>Only people I invite</strong><em>You add people or send them invite links. Recommended.</em></span></label>
+            <label class="choice ${v.signup === 'open' ? 'on' : ''}"><input type="radio" name="signup" value="open" ${v.signup === 'open' ? 'checked' : ''}>
+              <span class="choice-ic">${icon('users', 18)}</span><span><strong>Anyone who can reach this server</strong><em>Fine on a private office network. Each person still only sees workspaces they’re added to.</em></span></label>
+          </div>` : ''}
+        <div class="setup-nav">
+          ${step ? '<button type="button" class="btn ghost" data-prev>Back</button>' : '<span></span>'}
+          <button class="btn primary large auth-submit" type="submit">${step < 2 ? 'Continue' : 'Finish setup'}</button>
+        </div>
+      </form>`, { onBack });
+    $('.auth-back', root)?.addEventListener('click', () => { root.remove(); onBack(); });
+    const form = $('.setup-form', root);
+    const keep = () => { for (const [k, val] of new FormData(form)) v[k] = String(val); };
+    form.addEventListener('change', () => { keep(); if (step === 2) render(); });
+    $('[data-prev]', root)?.addEventListener('click', () => { keep(); step--; render(); });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      keep();
+      if (step === 0 && !v.teamName.trim()) return toast('Give your team a name', { kind: 'error' });
+      if (step === 1) {
+        if (!v.name.trim()) return toast('Enter your name', { kind: 'error' });
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.email.trim())) return toast('Enter a valid email address', { kind: 'error' });
+        if (v.password.length < 8) return toast('Use at least 8 characters for your password', { kind: 'error' });
+      }
+      if (step < 2) { step++; return render(); }
+      const btn = $('.auth-submit', root);
+      btn.disabled = true;
+      try {
+        const r = await teamClient({ url: base }).post('/api/setup', v);
+        const conn = { url: base, token: r.token, user: r.user };
+        saveTeam(conn);
+        root.remove();
+        await startTeam(conn, { hosted, onExit: onBack });
+        adminConsole('people', { welcome: true });
+      } catch (err) { toast(err.message, { kind: 'error' }); btn.disabled = false; }
+    });
+    setTimeout(() => [...root.querySelectorAll('.setup-form input:not([type=radio])')].find((i) => !i.value)?.focus(), 30);
+  };
+  render();
+}
+
+// "Choose a password" from a link an admin sent (new account or password reset).
+async function showPasswordLink({ root, hosted, url, token, onBack }) {
+  const base = hosted ? location.origin : normalizeUrl(url);
+  const api = teamClient({ url: base });
+  let link;
+  try { link = await api.get(`/api/auth/password-link/${token}`); } catch (e) { link = { error: e.message }; }
+  root.innerHTML = authShell(`
+    <div class="auth-logo">${logo(48)}</div>
+    ${link.error ? `<h1>Link expired</h1><p class="auth-sub">${esc(link.error)}</p>
+      <button class="btn primary large auth-submit" data-signin>Go to sign in</button>`
+      : `<h1>${link.kind === 'welcome' ? `Welcome, ${esc(link.name.split(' ')[0])}` : 'Choose a new password'}</h1>
+      <p class="auth-sub">${link.kind === 'welcome' ? `You’ve been added to <b>${esc(link.team)}</b> on Local Notes. Choose a password to get started.` : `For <b>${esc(link.email)}</b> on ${esc(link.team)}.`}</p>
+      <form class="auth-form" novalidate>
+        <label class="field"><span>Email</span><input value="${esc(link.email)}" disabled></label>
+        <label class="field"><span>New password</span><input name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters"></label>
+        <label class="field"><span>Type it again</span><input name="again" type="password" autocomplete="new-password"></label>
+        <button class="btn primary large auth-submit" type="submit">${link.kind === 'welcome' ? 'Join' : 'Save password'}</button>
+      </form>`}`, { onBack });
+  $('.auth-back', root)?.addEventListener('click', () => { root.remove(); onBack(); });
+  const toSignIn = () => { history.replaceState(null, '', '#'); showTeamSignIn({ hosted, url: base, onBack }); };
+  $('[data-signin]', root)?.addEventListener('click', toSignIn);
+  $('.auth-form', root)?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    if (f.password.length < 8) return toast('Use at least 8 characters', { kind: 'error' });
+    if (f.password !== f.again) return toast('The passwords don’t match', { kind: 'error' });
+    const btn = $('.auth-submit', root);
+    btn.disabled = true;
+    try {
+      const r = await api.post(`/api/auth/password-link/${token}`, { password: f.password });
+      const conn = { url: base, token: r.token, user: r.user };
+      saveTeam(conn);
+      history.replaceState(null, '', '#');
+      root.remove();
+      await startTeam(conn, { hosted, onExit: onBack });
+      toast(link.kind === 'welcome' ? 'Welcome to Local Notes' : 'Password saved', { kind: 'success' });
+    } catch (err) { toast(err.message, { kind: 'error' }); btn.disabled = false; }
+  });
+  setTimeout(() => $('.auth-form [name=password]', root)?.focus(), 30);
+}
+
 function mountRoot() {
   $('#team-root')?.remove();
   const root = h('<div id="team-root" class="team-root"></div>');
@@ -125,7 +236,7 @@ export async function startTeam(conn, { hosted = false, onExit = null } = {}) {
   const root = mountRoot();
   T = {
     conn, api, hosted, onExit, root,
-    me: me.user, workspaces: me.workspaces, unread: me.unread,
+    me: me.user, workspaces: me.workspaces, unread: me.unread, addresses: me.server?.addresses || [],
     pages: new Map(), roles: new Map(), people: new Map(),
     expanded: new Set(store.get(`ln:team:${conn.url}:expanded`, [])),
     collapsedWs: new Set(store.get(`ln:team:${conn.url}:collapsed`, [])),
@@ -209,6 +320,10 @@ function restoreHost() { if (savedHost) Object.assign(host, savedHost); }
 
 const findPage = (id) => { for (const list of T.pages.values()) { const p = list.find((x) => x.id === id); if (p) return p; } return null; };
 const wsById = (id) => T.workspaces.find((w) => w.id === id);
+// Base address for links people send to each other: if you're on the server machine itself
+// (localhost), use its network address instead so the link works on teammates' computers.
+const isLocalHost = (u) => /^https?:\/\/(localhost|127\.|\[::1\])/.test(u);
+const shareBase = () => (isLocalHost(T.api.base) && T.addresses?.length ? T.addresses[0] : T.api.base);
 const canEdit = (wsId) => ['owner', 'editor'].includes(wsById(wsId)?.role);
 const SHARED = 'shared'; // sidebar section for pages people shared with you from workspaces you're not in
 const canEditPage = (p) => !!p && (p.role ? p.role !== 'viewer' : canEdit(p.workspaceId));
@@ -599,7 +714,7 @@ function accountMenu(anchor) {
     { custom: h(`<div class="menu-server">${icon('drive', 13)}<span>${esc(T.api.base.replace(/^https?:\/\//, ''))}</span></div>`) },
     'sep',
     { label: 'Profile & password…', icon: 'pencil', run: profileDialog },
-    ...(T.me.isAdmin ? [{ label: 'AI settings (admin)…', icon: 'sparkles', run: () => openAISettings() }] : []),
+    ...(T.me.isAdmin ? [{ label: 'Server admin…', icon: 'drive', run: () => adminConsole() }] : []),
     { label: 'Appearance', icon: 'sun', run: () => themeMenuTeam(anchor) },
     ...(others.length ? ['sep', { header: 'Other servers' }, ...others.map((c) => ({ label: c.url.replace(/^https?:\/\//, ''), icon: 'drive', run: () => { const exit = T.onExit; stopTeam(); startTeam(c, { onExit: exit }); } }))] : []),
     'sep',
@@ -673,6 +788,160 @@ function rowMenu(pageId, anchor) {
     { label: 'Copy as wikilink', icon: 'page-link', run: () => copy(`[[${p.title}]]`, 'Wikilink copied') },
     ...(edit ? ['sep', { label: 'Move to trash', icon: 'trash', danger: true, run: () => deletePage(p.id) }] : []),
   ], anchor);
+}
+
+// ================================================================== server admin console
+async function adminConsole(tab = 'people', { welcome = false } = {}) {
+  const box = h(`<div class="admin">
+    <div class="share-head"><div><h2>Server admin</h2><p class="adm-sub"></p></div><button class="icon-btn" data-close>${icon('x', 18)}</button></div>
+    <nav class="adm-tabs">${[['people', 'users', 'People'], ['workspaces', 'library', 'Workspaces'], ['settings', 'drive', 'Server'], ['ai', 'sparkles', 'AI']]
+      .map(([k, ic, label]) => `<button data-tab="${k}">${icon(ic, 15)}<span>${label}</span></button>`).join('')}</nav>
+    <div class="adm-body"></div>
+  </div>`);
+  const m = openModal(box, { className: 'admin-modal' });
+  $('[data-close]', box).onclick = () => m.close();
+  let data;
+  const body = $('.adm-body', box);
+  const linkUrl = (token) => `${shareBase()}/#/password/${token}`;
+  const load = async () => { data = await T.api.get('/api/admin/overview'); $('.adm-sub', box).textContent = `${data.settings.name} · ${data.users.filter((u) => !u.disabled).length} people · version ${data.version}`; };
+  const linkBox = (u, token, kind) => `<div class="adm-link pop">
+      <div class="adm-link-head">${icon(kind === 'welcome' ? 'user-plus' : 'lock', 16)}<strong>${kind === 'welcome' ? `Send this link to ${esc(u.name)}` : `Password reset link for ${esc(u.name)}`}</strong></div>
+      <p>${kind === 'welcome' ? 'They open it, choose a password and they’re in. It works once, for 14 days.' : 'They open it and choose a new password. It works once, for 2 days.'} Send it by email or chat.</p>
+      <div class="share-link"><input readonly value="${esc(linkUrl(token))}"><button class="btn primary small" data-copy-url>${icon('copy', 15)}<span>Copy</span></button></div>
+    </div>`;
+
+  async function show(name) {
+    tab = name;
+    box.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+    if (name === 'ai') {
+      body.innerHTML = `<div class="adm-empty">${icon('sparkles', 28, 1.4)}<strong>AI for everyone on this server</strong><span>Choose the AI provider and key your team uses. People never see the key.</span>
+        <button class="btn primary" data-ai>Open AI settings</button></div>`;
+      return;
+    }
+    body.innerHTML = '<p class="bl-empty pad">Loading…</p>';
+    try { await load(); } catch (e) { body.innerHTML = `<p class="bl-empty pad">${esc(e.message)}</p>`; return; }
+    if (tab !== name) return;
+    if (name === 'people') renderPeople();
+    if (name === 'workspaces') renderWorkspaces();
+    if (name === 'settings') renderSettings();
+  }
+
+  function renderPeople(extra = '') {
+    const ago = (t) => (t ? timeAgo(t / 1000) : 'never');
+    body.innerHTML = `
+      ${welcome ? `<div class="adm-welcome">${icon('success', 20)}<div><strong>Your team server is ready</strong><span>Add the people who should use it. Each person gets a link to choose their own password. You can also share workspace invite links later.</span></div></div>` : ''}
+      <div class="adm-bar"><div class="pk-label">${data.users.length} ${data.users.length === 1 ? 'person' : 'people'}</div><button class="btn primary small" data-add-person>${icon('user-plus', 15)}<span>Add person</span></button></div>
+      <div class="adm-slot">${extra}</div>
+      <div class="share-list adm-list">${data.users.map((u) => `<div class="member ${u.disabled ? 'off' : ''}" data-user="${u.id}">
+        ${avatar(u, 34)}<div class="member-info"><strong>${esc(u.name)}${u.id === T.me.id ? ' <em>(you)</em>' : ''}
+          ${u.isAdmin ? '<b class="adm-tag">Admin</b>' : ''}${u.disabled ? '<b class="adm-tag warn">Suspended</b>' : ''}${u.pendingSetup ? '<b class="adm-tag soft">Invited</b>' : ''}</strong>
+          <span>${esc(u.email)} · ${u.pendingSetup ? 'hasn’t chosen a password yet' : `active ${ago(u.lastSeen)}`}</span>
+          ${u.workspaces.length ? `<span class="adm-ws">${u.workspaces.map((w) => `${esc(w.name)} <i>${ROLE_LABEL[w.role].toLowerCase()}</i>`).join(' · ')}</span>` : '<span class="adm-ws">Not in any team workspace</span>'}</div>
+        <button class="icon-btn" data-person-menu title="Options">${icon('more', 17)}</button></div>`).join('')}</div>`;
+    if (welcome) { welcome = false; setTimeout(() => $('[data-add-person]', body)?.click(), 60); }
+  }
+
+  function addPersonForm() {
+    const ws = data.workspaces;
+    $('.adm-slot', body).innerHTML = `<form class="adm-form pop" novalidate>
+      <div class="adm-form-head"><strong>Add a person</strong><button type="button" class="icon-btn" data-cancel>${icon('x', 16)}</button></div>
+      <div class="adm-row"><label class="field"><span>Name</span><input name="name" placeholder="Sam Kim"></label>
+        <label class="field"><span>Email</span><input name="email" type="email" placeholder="sam@company.com"></label></div>
+      ${ws.length ? `<div class="field"><span>Workspaces</span><div class="adm-checks">${ws.map((w, i) => `<label><input type="checkbox" name="ws" value="${w.id}" ${i === 0 ? 'checked' : ''}>${esc(w.name)}</label>`).join('')}</div></div>` : ''}
+      <div class="adm-row"><label class="field"><span>Access in those workspaces</span><select name="role"><option value="editor">Can edit</option><option value="viewer">Can view</option><option value="owner">Owner</option></select></label>
+        <label class="adm-check"><input type="checkbox" name="isAdmin"><span>Server admin<em>Can add people and change server settings</em></span></label></div>
+      <div class="adm-actions"><button type="button" class="btn ghost" data-cancel>Cancel</button><button class="btn primary" type="submit">Add and get link</button></div>
+    </form>`;
+    const f = $('.adm-form', body);
+    setTimeout(() => $('[name=name]', f).focus(), 30);
+    f.addEventListener('click', (e) => { if (e.target.closest('[data-cancel]')) $('.adm-slot', body).innerHTML = ''; });
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(f);
+      try {
+        const r = await T.api.post('/api/admin/users', { name: fd.get('name'), email: fd.get('email'), role: fd.get('role'), isAdmin: !!fd.get('isAdmin'), workspaceIds: fd.getAll('ws') });
+        await load();
+        renderPeople(linkBox(r.user, r.token, 'welcome'));
+        reloadMe().catch(() => {});
+      } catch (err) { toast(err.message, { kind: 'error' }); }
+    });
+  }
+
+  async function personAction(u, act) {
+    try {
+      if (act === 'link') {
+        const r = await T.api.post(`/api/admin/users/${u.id}/password-link`);
+        return renderPeople(linkBox(u, r.token, u.pendingSetup ? 'welcome' : 'reset'));
+      }
+      if (act === 'suspend' && !(await confirmDialog({ title: `Suspend ${u.name}?`, body: 'They’re signed out everywhere and can’t sign in until you restore access. Their pages stay where they are.', confirm: 'Suspend', danger: true }))) return;
+      const patch = act === 'admin' ? { isAdmin: !u.isAdmin } : { disabled: act === 'suspend' };
+      await T.api.patch(`/api/admin/users/${u.id}`, patch);
+      toast(act === 'admin' ? (u.isAdmin ? `${u.name} is no longer an admin` : `${u.name} is now an admin`) : act === 'suspend' ? `${u.name} is suspended` : `${u.name} can sign in again`, { kind: 'success' });
+      await load();
+      renderPeople();
+    } catch (e) { toast(e.message, { kind: 'error' }); }
+  }
+
+  function renderWorkspaces() {
+    body.innerHTML = `<div class="adm-bar"><div class="pk-label">${data.workspaces.length} team workspace${data.workspaces.length === 1 ? '' : 's'}</div><button class="btn primary small" data-new-ws>${icon('plus', 15)}<span>New workspace</span></button></div>
+      <div class="share-list adm-list">${data.workspaces.map((w) => `<div class="member" data-ws="${w.id}">
+        <span class="share-ic">${icon('library', 17)}</span><div class="member-info"><strong>${esc(w.name)}</strong>
+          <span>${w.members} member${w.members === 1 ? '' : 's'} · ${w.pages} page${w.pages === 1 ? '' : 's'} · owner${w.owners.length === 1 ? '' : 's'}: ${esc(w.owners.join(', ') || 'none')}</span></div>
+        ${w.myRole === 'owner' ? '<button class="btn ghost small" data-ws-members>Members</button>' : `<button class="btn ghost small" data-ws-join title="Add yourself as an owner so you can manage it">${w.myRole ? 'Make me owner' : 'Join as owner'}</button>`}
+      </div>`).join('') || '<p class="bl-empty pad">No team workspaces yet.</p>'}</div>`;
+  }
+
+  function renderSettings() {
+    const st = data.settings;
+    body.innerHTML = `<form class="adm-form flat" novalidate>
+      <label class="field"><span>Team or server name</span><input name="name" value="${esc(st.name)}"></label>
+      <div class="field"><span>Who can create an account</span><div class="choice-list">
+        <label class="choice ${st.signup === 'invite' ? 'on' : ''}"><input type="radio" name="signup" value="invite" ${st.signup === 'invite' ? 'checked' : ''}><span class="choice-ic">${icon('lock', 18)}</span><span><strong>Only people you add or invite</strong><em>Recommended</em></span></label>
+        <label class="choice ${st.signup === 'open' ? 'on' : ''}"><input type="radio" name="signup" value="open" ${st.signup === 'open' ? 'checked' : ''}><span class="choice-ic">${icon('users', 18)}</span><span><strong>Anyone who can reach this server</strong><em>They only see workspaces they’re added to</em></span></label>
+      </div></div>
+      <div class="adm-actions"><button class="btn primary" type="submit">Save changes</button></div>
+    </form>
+    <div class="adm-facts">
+      <div><span>Address for your team</span><strong>${esc(shareBase())}</strong><button class="link-btn small" data-copy-base>Copy</button></div>
+      ${isLocalHost(T.api.base) && !T.addresses.length ? `<p>${icon('warning', 13)}This computer isn’t connected to a network, so teammates can’t reach it yet.</p>` : ''}
+      <div><span>Version</span><strong>${esc(data.version)}</strong></div>
+      <div><span>Data folder</span><strong class="mono">${esc(data.dataDir)}</strong></div>
+      <p>${icon('info', 13)}Back up the data folder regularly: it holds the database and a plain-markdown copy of every page.</p>
+    </div>`;
+    const f = $('.adm-form', body);
+    f.addEventListener('change', () => f.querySelectorAll('.choice').forEach((c) => c.classList.toggle('on', $('input', c).checked)));
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(f);
+      try { await T.api.patch('/api/admin/settings', { name: fd.get('name'), signup: fd.get('signup') }); toast('Settings saved', { kind: 'success' }); await load(); } catch (err) { toast(err.message, { kind: 'error' }); }
+    });
+  }
+
+  box.addEventListener('click', async (e) => {
+    const t = e.target.closest('[data-tab]');
+    if (t) return show(t.dataset.tab);
+    if (e.target.closest('[data-ai]')) { m.close(); return openAISettings(); }
+    if (e.target.closest('[data-add-person]')) return addPersonForm();
+    if (e.target.closest('[data-copy-url]')) return copy($('.adm-link input', box).value, 'Link copied');
+    if (e.target.closest('[data-copy-base]')) return copy(shareBase(), 'Address copied');
+    if (e.target.closest('[data-new-ws]')) { m.close(); return newWorkspace(); }
+    const pm = e.target.closest('[data-person-menu]');
+    if (pm) {
+      const u = data.users.find((x) => x.id === pm.closest('[data-user]').dataset.user);
+      return showMenu([
+        { header: u.name },
+        ...(!u.disabled ? [{ label: u.pendingSetup ? 'Copy a new setup link' : 'Password reset link', icon: u.pendingSetup ? 'user-plus' : 'lock', run: () => personAction(u, 'link') }] : []),
+        { label: u.isAdmin ? 'Remove admin rights' : 'Make server admin', icon: 'drive', run: () => personAction(u, 'admin') },
+        ...(u.id !== T.me.id ? ['sep', u.disabled ? { label: 'Restore access', icon: 'success', run: () => personAction(u, 'restore') } : { label: 'Suspend access…', icon: 'logout', danger: true, run: () => personAction(u, 'suspend') }] : []),
+      ], pm, { align: 'end' });
+    }
+    const wsRow = e.target.closest('[data-ws]');
+    if (wsRow && e.target.closest('[data-ws-members]')) { m.close(); return shareDialog(wsRow.dataset.ws); }
+    if (wsRow && e.target.closest('[data-ws-join]')) {
+      try { await T.api.post(`/api/admin/workspaces/${wsRow.dataset.ws}/join`); await reloadMe(); toast('You’re now an owner of that workspace', { kind: 'success' }); await load(); renderWorkspaces(); } catch (err) { toast(err.message, { kind: 'error' }); }
+    }
+  });
+  show(tab);
 }
 
 // ================================================================== workspaces
@@ -773,7 +1042,7 @@ async function shareDialog(wsId) {
   $('[data-invite]', box)?.addEventListener('click', async () => {
     try {
       const r = await T.api.post(`/api/workspaces/${wsId}/invites`, { role: $('.share-role', box).value });
-      const link = `${T.api.base}/#/invite/${r.token}`;
+      const link = `${shareBase()}/#/invite/${r.token}`;
       $('.share-link', box).hidden = false;
       $('.share-link input', box).value = link;
       $('.share-link input', box).select();
@@ -1324,7 +1593,7 @@ function pageMenu(anchor) {
 }
 
 const copy = (text, msg) => copyText(text).then((ok) => toast(ok ? msg : 'Couldn’t copy — select the text and press Ctrl+C', { kind: ok ? 'success' : 'error' }));
-const copyLink = (id) => copy(`${T.api.base}/#/p/${id}`, 'Link copied');
+const copyLink = (id) => copy(`${shareBase()}/#/p/${id}`, 'Link copied');
 
 // ================================================================== bubble menu (format + comment)
 function buildBubble(c) {

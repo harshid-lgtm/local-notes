@@ -6,6 +6,7 @@ const { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeTheme } = requir
 const path = require('path');
 const fs = require('fs');
 const { createVaultServer } = require('../server/core');
+const host = require('./host');
 
 const IS_MAC = process.platform === 'darwin';
 const ROOT = path.join(__dirname, '..');
@@ -16,11 +17,7 @@ if (process.env.LOCAL_NOTES_USER_DATA) app.setPath('userData', process.env.LOCAL
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.focus();
-  });
+  app.on('second-instance', () => showWindow());
 }
 
 let win = null;
@@ -39,6 +36,14 @@ function saveBounds() {
 
 function overlayColors(dark) {
   return dark ? { color: '#191918', symbolColor: '#d4d3cf', height: 46 } : { color: '#ffffff', symbolColor: '#5f5d58', height: 46 };
+}
+
+function showWindow() {
+  if (!port) return;
+  if (!win) { createWindow(); return; }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
 }
 
 function createWindow() {
@@ -64,7 +69,10 @@ function createWindow() {
   if (b.maximized) win.maximize();
   win.loadURL(`http://localhost:${port}/`);
   win.once('ready-to-show', () => win.show());
-  win.on('close', saveBounds);
+  win.on('close', (e) => {
+    saveBounds();
+    if (host.shouldHideInsteadOfClose()) { e.preventDefault(); win.hide(); }
+  });
   win.on('closed', () => { win = null; });
 
   const own = (url) => url.startsWith(`http://localhost:${port}/`);
@@ -131,14 +139,23 @@ ipcMain.on('set-theme', (_e, { dark }) => {
 });
 ipcMain.on('reveal', (_e, p) => { if (typeof p === 'string' && fs.existsSync(p)) shell.showItemInFolder(p); });
 
+// hosting a team server on this computer
+ipcMain.handle('host:status', () => host.status());
+ipcMain.handle('host:start', (_e, opts = {}) => host.start(opts.port));
+ipcMain.handle('host:stop', () => host.stop());
+ipcMain.handle('host:open-at-login', (_e, on) => host.setOpenAtLogin(on));
+ipcMain.on('host:open-data', () => { const d = host.status().dataDir; fs.mkdirSync(d, { recursive: true }); shell.openPath(d); });
+
 app.whenReady().then(async () => {
   const { server } = createVaultServer({ configDir: app.getPath('userData'), publicDir: path.join(ROOT, 'public') });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = server.address().port;
   buildMenu();
-  createWindow();
+  host.init({ notify: (s) => { if (win && !win.isDestroyed()) win.webContents.send('host-changed', s); }, show: showWindow });
+  // started with the computer to host the team server: stay in the tray until opened
+  if (!host.startedHidden()) createWindow();
   setupUpdater();
-  app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
+  app.on('activate', () => showWindow());
 });
 
-app.on('window-all-closed', () => { if (!IS_MAC) app.quit(); });
+app.on('window-all-closed', () => { if (!IS_MAC && !host.isHosting()) app.quit(); });
