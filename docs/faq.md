@@ -28,6 +28,10 @@ Open **AI settings**, choose a provider, paste your key and press **Save**. See 
 
 Make sure Ollama is running (`ollama serve`) and you've pulled a model (`ollama pull llama3.2`). The default address is `http://localhost:11434`.
 
+### Will I lose my work or settings when I update?
+
+No. Updates replace only the program. Your notes are ordinary files in your own folders, and your settings (theme, text size, recent vaults, team server sign-ins) are kept in your profile folder, which updates never touch. Before restarting to install an update, the app saves anything you haven't saved yet.
+
 ### Is my data sent anywhere?
 
 Local vaults: only when you use an AI feature, and then only to the provider you configured. Teams: pages are stored on your own team server.

@@ -9,6 +9,9 @@ import { icon, logo } from '../icons.js';
 import { $, h, esc, showMenu, openModal, confirmDialog, toast, store, timeAgo, modKey, copyText } from '../ui.js';
 import { mountGraph, setFolders, folderColor } from '../graph.js';
 import { formatButtons, runFormat, syncFormat } from '../format.js';
+import { openFindBar, closeFindBar } from '../find.js';
+import { exportMenuItems, printPage } from '../export.js';
+import { convertFile, linkImages, IMPORT_ACCEPT } from '../importer.js';
 import { teamClient, normalizeUrl, saveTeam, forgetTeam, savedTeams } from './client.js';
 import { setAITransport, resetAITransport, setAIHooks, forgetAIStatus, openAIMenu, openWritePanel, summarizePage, toggleAskPanel, openAISettings, closeAskPanel } from '../ai/ai.js';
 
@@ -19,7 +22,7 @@ const avatar = (u, size = 24) => `<span class="avatar" style="--c:${esc(u?.color
 const ROLE_LABEL = { owner: 'Owner', editor: 'Can edit', viewer: 'Can view' };
 
 // ================================================================== sign in
-export async function showTeamSignIn({ hosted = false, url = '', invite = null, onBack = null, passwordToken = null } = {}) {
+export async function showTeamSignIn({ hosted = false, url = '', invite = null, onBack = null, passwordToken = null, joinToken = null } = {}) {
   const root = mountRoot();
   if (passwordToken) return showPasswordLink({ root, hosted, url, token: passwordToken, onBack });
   let info = null;
@@ -36,6 +39,9 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
       if (invite) {
         try { info.invite = await teamClient({ url: base }).get(`/api/invites/${invite}`); mode = 'signup'; } catch (e) { info.inviteError = e.message; }
       }
+      if (joinToken) {
+        try { info.join = await teamClient({ url: base }).get(`/api/page-invites/${joinToken}`); mode = info.join.hasAccount ? 'login' : 'signup'; } catch (e) { info.inviteError = e.message; }
+      }
     } catch (e) {
       info = { error: hosted ? e.message : 'Can’t reach a Local Notes team server at that address.' };
     }
@@ -49,6 +55,7 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
     const first = info && !info.error && !info.hasUsers;
     const title = first ? 'Set up your team' : mode === 'signup' ? 'Create your account' : 'Welcome back';
     const sub = first ? 'You’re the first person here — your account will be the admin.'
+      : info?.join ? `${esc(info.join.invitedBy)} invited you to <b>${esc(info.join.pageTitle)}</b> in ${esc(info.join.team)}. ${info.join.hasAccount ? 'Sign in to open it.' : 'Create your account to open it.'}`
       : info?.invite ? `${esc(info.invite.invitedBy || 'A teammate')} invited you to <b>${esc(info.invite.workspace)}</b>.`
         : info?.name ? `Sign in to <b>${esc(info.name)}</b> on Local Notes.` : 'Connect to your team’s Local Notes server.';
     root.innerHTML = `
@@ -64,7 +71,7 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
             ${hosted ? '' : `<label class="field"><span>Server address</span><input name="server" placeholder="notes.yourcompany.com" value="${esc(url)}" spellcheck="false" autocomplete="url"></label>`}
             ${info?.error ? `<div class="auth-error">${esc(info.error)}</div>` : ''}
             ${mode === 'signup' ? '<label class="field"><span>Your name</span><input name="name" autocomplete="name" placeholder="Maya Chen"></label>' : ''}
-            <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" placeholder="you@company.com"></label>
+            <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" placeholder="you@company.com" ${info?.join ? `value="${esc(info.join.email)}" readonly` : ''}></label>
             <label class="field"><span>Password</span><input name="password" type="password" autocomplete="${mode === 'signup' ? 'new-password' : 'current-password'}" placeholder="${mode === 'signup' ? 'At least 8 characters' : ''}"></label>
             <button class="btn primary large auth-submit" type="submit">${mode === 'signup' ? (first ? 'Create admin account' : 'Create account') : 'Sign in'}</button>
           </form>
@@ -73,7 +80,7 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
         </div>
         <p class="auth-foot">${icon('info', 14)}<span>Your private space is only visible to you. Team workspaces are shared with the people you invite.</span></p>
       </div>`;
-    for (const [k, v] of Object.entries(kept)) { const i = $(`.auth-form [name=${k}]`, root); if (i && k !== 'server') i.value = v; }
+    for (const [k, v] of Object.entries(kept)) { const i = $(`.auth-form [name=${k}]`, root); if (i && k !== 'server' && !i.readOnly) i.value = v; }
     $('[data-mode]', root)?.addEventListener('click', () => { mode = mode === 'signup' ? 'login' : 'signup'; render(); });
     $('.auth-back', root)?.addEventListener('click', () => { root.remove(); onBack(); });
     $('[data-forgot]', root)?.addEventListener('click', () => toast('Ask an admin of this server to send you a password reset link (Server admin → People).', { timeout: 9000 }));
@@ -88,10 +95,11 @@ export async function showTeamSignIn({ hosted = false, url = '', invite = null, 
       btn.disabled = true;
       try {
         const api = teamClient({ url: base });
-        const r = await api.post(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', { ...f, invite });
+        const r = await api.post(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', { ...f, ...(info?.join ? { email: info.join.email } : {}), invite, pageInvite: joinToken || undefined });
         const conn = { url: base, token: r.token, user: r.user };
         saveTeam(conn);
         if (invite && hosted) history.replaceState(null, '', '#');
+        if (joinToken && hosted) history.replaceState(null, '', r.openPage ? `#/p/${r.openPage}` : '#');
         root.remove();
         await startTeam(conn, { hosted, onExit: onBack });
       } catch (err) {
@@ -512,6 +520,7 @@ function buildShell() {
   wireTree();
   wireTitle();
   wireKeys();
+  wireTeamDrop();
   renderBadge();
   const add = $('#t-block-handle .bh-add');
   add.addEventListener('mousedown', (e) => e.preventDefault());
@@ -544,6 +553,12 @@ function wireKeys() {
       if (ed?.isFocused && !ed.state.selection.empty) openAIMenu(ed, T.current.bubble.querySelector('[data-cmd="ai"]') || { x: innerWidth / 2, y: 120 });
       else if (ed?.isFocused && ed.isEditable) openWritePanel(ed);
       else toggleAskPanel();
+    } else if (mod && (k === 'f' || k === 'h') && !e.shiftKey && !e.altKey && T.current) {
+      e.preventDefault();
+      openFindBar(T.current.editor, { replace: k === 'h' });
+    } else if (mod && e.shiftKey && k === 'f') {
+      e.preventDefault();
+      if (!$('.palette')) openSearch();
     } else if (mod && e.altKey && k === 'm') {
       e.preventDefault();
       startComment();
@@ -714,6 +729,7 @@ function accountMenu(anchor) {
     { custom: h(`<div class="menu-server">${icon('drive', 13)}<span>${esc(T.api.base.replace(/^https?:\/\//, ''))}</span></div>`) },
     'sep',
     { label: 'Profile & password…', icon: 'pencil', run: profileDialog },
+    { label: 'Contacts…', icon: 'users', run: () => contactsDialog() },
     ...(T.me.isAdmin ? [{ label: 'Server admin…', icon: 'drive', run: () => adminConsole() }] : []),
     { label: 'Appearance', icon: 'sun', run: () => themeMenuTeam(anchor) },
     ...(others.length ? ['sep', { header: 'Other servers' }, ...others.map((c) => ({ label: c.url.replace(/^https?:\/\//, ''), icon: 'drive', run: () => { const exit = T.onExit; stopTeam(); startTeam(c, { onExit: exit }); } }))] : []),
@@ -731,11 +747,24 @@ function themeMenuTeam(anchor) {
     document.documentElement.dataset.theme = theme === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : theme;
     window.desktop?.setTheme(document.documentElement.dataset.theme === 'dark');
   };
+  const sizes = h(`<div class="size-picker"><span class="size-label">Text size</span><div class="size-opts">${[['small', 13], ['default', 15], ['large', 17.5], ['xl', 20]].map(([k, px]) => `
+    <button class="size-opt ${(prefs.textSize || 'default') === k ? 'on' : ''}" data-size="${k}"><span style="font-size:${px}px">A</span></button>`).join('')}</div></div>`);
+  sizes.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const b = e.target.closest('[data-size]');
+    if (!b) return;
+    prefs.textSize = b.dataset.size;
+    store.set('ln:prefs', prefs);
+    document.documentElement.dataset.textsize = prefs.textSize;
+    sizes.querySelectorAll('.size-opt').forEach((x) => x.classList.toggle('on', x === b));
+  });
   showMenu([
     { header: 'Appearance' },
     { label: 'System', icon: 'monitor', checked: prefs.theme === 'system', run: () => set('system') },
     { label: 'Light', icon: 'sun', checked: prefs.theme === 'light', run: () => set('light') },
     { label: 'Dark', icon: 'moon', checked: prefs.theme === 'dark', run: () => set('dark') },
+    'sep',
+    { custom: sizes },
   ], anchor);
 }
 
@@ -768,6 +797,7 @@ function workspaceMenu(wsId, anchor) {
     { header: ws.name },
     { label: 'Share & members…', icon: 'arrow-up-right', run: () => shareDialog(wsId) },
     { label: 'Graph of this workspace', icon: 'graph', run: () => showGraph(wsId) },
+    ...(canEdit(wsId) ? [{ label: 'Import files…', icon: 'file-up', run: () => pickTeamImport(wsId) }] : []),
     { label: 'Trash', icon: 'trash', run: () => trashDialog(wsId) },
     ...(owner ? ['sep', { label: 'Rename…', icon: 'pencil', run: () => renameWorkspace(wsId) }] : []),
     'sep',
@@ -784,17 +814,118 @@ function rowMenu(pageId, anchor) {
     ...(edit ? [{ label: 'Add subpage', icon: 'file-plus', run: () => { T.expanded.add(p.id); createPage(p.workspaceId, p.id); } }] : []),
     { label: 'Share…', icon: 'user-plus', run: () => pageShareDialog(p.id) },
     ...(edit && moveTargets(p).length ? [{ label: 'Move to…', icon: 'move', run: () => moveMenu(p.id, anchor) }] : []),
+    ...(edit ? [{ label: 'Import files as subpages…', icon: 'file-up', run: () => { T.expanded.add(p.id); pickTeamImport(p.workspaceId, p.id); } }] : []),
     { label: 'Copy link', icon: 'link', run: () => copyLink(p.id) },
     { label: 'Copy as wikilink', icon: 'page-link', run: () => copy(`[[${p.title}]]`, 'Wikilink copied') },
     ...(edit ? ['sep', { label: 'Move to trash', icon: 'trash', danger: true, run: () => deletePage(p.id) }] : []),
   ], anchor);
 }
 
+// ================================================================== address book
+// Read contacts exported from Google Contacts / Gmail (CSV), Outlook (CSV) or any vCard (.vcf) file.
+function parseContactsFile(name, text) {
+  const out = [];
+  const add = (n, e) => { const email = String(e || '').trim().replace(/^mailto:/i, ''); if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) out.push({ name: String(n || '').trim(), email }); };
+  if (/\.vcf$/i.test(name) || /BEGIN:VCARD/i.test(text)) {
+    const unfolded = text.replace(/\r?\n[ \t]/g, '');
+    for (const card of unfolded.split(/BEGIN:VCARD/i).slice(1)) {
+      const fn = /^FN(?:;[^:]*)?:(.*)$/im.exec(card)?.[1] || (/^N(?:;[^:]*)?:([^;\r\n]*);([^;\r\n]*)/im.exec(card) || []).slice(1, 3).reverse().join(' ');
+      for (const m of card.matchAll(/^(?:item\d+\.)?EMAIL(?:;[^:]*)?:(.*)$/gim)) add(fn.replace(/\\,/g, ','), m[1]);
+    }
+    return out;
+  }
+  const rows = parseCsv(text);
+  if (!rows.length) return out;
+  const head = rows[0].map((h) => h.trim().toLowerCase());
+  const col = (...names) => head.findIndex((h) => names.some((n) => h === n));
+  const emailCols = head.map((h, i) => (/e-?mail/.test(h) && !/type|label|display/.test(h) ? i : -1)).filter((i) => i >= 0);
+  const nameCol = col('name', 'display name', 'full name');
+  const first = col('first name', 'given name');
+  const middle = col('middle name', 'additional name');
+  const last = col('last name', 'family name', 'surname');
+  for (const r of rows.slice(1)) {
+    const name = nameCol >= 0 && r[nameCol] ? r[nameCol] : [r[first], r[middle], r[last]].filter((x) => x && x.trim()).join(' ');
+    const cells = emailCols.length ? emailCols.map((i) => r[i]) : r;
+    for (const cell of cells) for (const e of String(cell || '').split(/\s*:::\s*|[;,\s]+/)) add(name, e);
+  }
+  return out;
+}
+function parseCsv(text) {
+  const src = text.replace(/^\ufeff/, '');
+  const rows = []; let row = []; let cell = ''; let q = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (q) { if (ch === '"' && src[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') q = false; else cell += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && src[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c.trim()));
+}
+
+async function contactsDialog() {
+  const box = h(`<div class="share contacts">
+    <div class="share-head"><div><h2>Contacts</h2><p>Suggestions when you share come from people on this server and these contacts. People you share with are added automatically.</p></div>
+      <button class="icon-btn" data-close>${icon('x', 18)}</button></div>
+    <div class="ct-import">
+      <div><strong>Import your address book</strong>
+        <span>Gmail: <a href="https://contacts.google.com" target="_blank" rel="noopener">Google Contacts</a> → Export → Google CSV. Outlook: People → Manage contacts → Export contacts. Apple Contacts: File → Export vCard.</span></div>
+      <button class="btn primary small" data-import>${icon('upload', 15)}<span>Import file</span></button>
+    </div>
+    <div class="ct-search">${icon('search', 15)}<input placeholder="Search contacts" spellcheck="false"></div>
+    <div class="share-list ct-list">Loading…</div>
+    <div class="ct-foot"><span class="ct-count"></span><button class="link-btn small danger-text" data-clear hidden>Remove all</button></div>
+  </div>`);
+  const m = openModal(box, { className: 'share-modal' });
+  let all = [];
+  const render = () => {
+    const q = $('.ct-search input', box).value.trim().toLowerCase();
+    const shown = all.filter((c) => !q || c.email.includes(q) || c.name.toLowerCase().includes(q));
+    $('.ct-list', box).innerHTML = shown.slice(0, 300).map((c) => `<div class="member" data-email="${esc(c.email)}">
+      ${c.onServer ? avatar({ name: c.name || c.email, color: '#7c8a9b' }, 30) : `<span class="ep-av-mail big">${icon('mail', 15)}</span>`}
+      <div class="member-info"><strong>${esc(c.name || c.email)}</strong><span>${esc(c.name ? c.email : '')}${c.onServer ? ' · on this server' : ''}${c.source === 'imported' ? ' · imported' : ''}</span></div>
+      <button class="icon-btn" data-remove title="Remove">${icon('x', 16)}</button></div>`).join('') || `<p class="bl-empty pad">${all.length ? 'No matches.' : 'No contacts yet. Import your address book, or share a page with someone.'}</p>`;
+    $('.ct-count', box).textContent = `${all.length} contact${all.length === 1 ? '' : 's'}`;
+    $('[data-clear]', box).hidden = !all.length;
+  };
+  const load = async () => { all = (await T.api.get('/api/contacts/all')).contacts; render(); };
+  $('[data-close]', box).onclick = () => m.close();
+  $('.ct-search input', box).addEventListener('input', render);
+  box.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-import]')) {
+      const input = h('<input type="file" accept=".csv,.vcf,.vcard,text/csv,text/vcard" hidden>');
+      document.body.append(input);
+      input.onchange = async () => {
+        const f = input.files[0];
+        input.remove();
+        if (!f) return;
+        const found = parseContactsFile(f.name, await f.text());
+        if (!found.length) { toast('No email addresses found in that file', { kind: 'error' }); return; }
+        try {
+          const r = await T.api.post('/api/contacts/import', { contacts: found });
+          toast(`Imported ${r.added} new contact${r.added === 1 ? '' : 's'}`, { kind: 'success' });
+          await load();
+        } catch (err) { toast(err.message, { kind: 'error' }); }
+      };
+      input.click();
+    }
+    const rm = e.target.closest('[data-remove]');
+    if (rm) { await T.api.del(`/api/contacts?email=${encodeURIComponent(rm.closest('[data-email]').dataset.email)}`); await load(); }
+    if (e.target.closest('[data-clear]') && await confirmDialog({ title: 'Remove all contacts?', body: 'Suggestions will only come from people on this server until you share or import again. People on the server aren’t affected.', confirm: 'Remove all', danger: true })) {
+      await T.api.del('/api/contacts?all=1');
+      await load();
+    }
+  });
+  load();
+}
+
 // ================================================================== server admin console
 async function adminConsole(tab = 'people', { welcome = false } = {}) {
   const box = h(`<div class="admin">
     <div class="share-head"><div><h2>Server admin</h2><p class="adm-sub"></p></div><button class="icon-btn" data-close>${icon('x', 18)}</button></div>
-    <nav class="adm-tabs">${[['people', 'users', 'People'], ['workspaces', 'library', 'Workspaces'], ['settings', 'drive', 'Server'], ['ai', 'sparkles', 'AI']]
+    <nav class="adm-tabs">${[['people', 'users', 'People'], ['workspaces', 'library', 'Workspaces'], ['settings', 'drive', 'Server'], ['email', 'mail', 'Email'], ['ai', 'sparkles', 'AI']]
       .map(([k, ic, label]) => `<button data-tab="${k}">${icon(ic, 15)}<span>${label}</span></button>`).join('')}</nav>
     <div class="adm-body"></div>
   </div>`);
@@ -824,6 +955,47 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
     if (name === 'people') renderPeople();
     if (name === 'workspaces') renderWorkspaces();
     if (name === 'settings') renderSettings();
+    if (name === 'email') renderEmail();
+  }
+
+  async function renderEmail() {
+    let st;
+    try { st = await T.api.get('/api/admin/email'); } catch (e) { body.innerHTML = `<p class="bl-empty pad">${esc(e.message)}</p>`; return; }
+    body.innerHTML = `<div class="adm-email">
+      <div class="adm-email-status ${st.configured ? 'on' : ''}">${icon(st.configured ? 'success' : 'mail', 18)}<div><strong>${st.configured ? 'Email is set up' : 'Email isn’t set up yet'}</strong>
+        <span>${st.configured ? `Invitations, share notifications and password links are sent from ${esc(st.from)}.` : 'Without it, people are notified inside Local Notes and you copy invitation links yourself. Use your company’s email server or a provider like Microsoft 365, Google Workspace, Brevo or SendGrid.'}</span></div></div>
+      <form class="adm-form flat" novalidate autocomplete="off">
+        <div class="adm-row"><label class="field"><span>SMTP server</span><input name="host" value="${esc(st.host)}" placeholder="smtp.office365.com"></label>
+          <label class="field"><span>Port</span><input name="port" value="${esc(st.port || '')}" placeholder="587" inputmode="numeric"></label></div>
+        <div class="adm-row"><label class="field"><span>Username</span><input name="user" value="${esc(st.user)}" placeholder="notes@company.com" autocomplete="off"></label>
+          <label class="field"><span>Password</span><input name="pass" type="password" placeholder="${st.hasPassword ? '•••••••• (saved)' : ''}" autocomplete="new-password"></label></div>
+        <div class="adm-row"><label class="field"><span>Send from</span><input name="from" value="${esc(st.from)}" placeholder="Local Notes &lt;notes@company.com&gt;"></label>
+          <label class="adm-check"><input type="checkbox" name="secure" ${st.secure ? 'checked' : ''}><span>Use SSL/TLS from the start<em>Usually only for port 465. Port 587 upgrades to TLS automatically.</em></span></label></div>
+        <div class="adm-actions">
+          ${st.configured ? '<button type="button" class="btn ghost" data-email-clear>Turn off email</button>' : ''}
+          <button type="button" class="btn ghost" data-email-test ${st.configured ? '' : 'disabled'}>Send test email</button>
+          <button class="btn primary" type="submit">Save</button></div>
+      </form></div>`;
+    const f = $('.adm-form', body);
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(f);
+      try {
+        await T.api.put('/api/admin/email', { host: fd.get('host'), port: fd.get('port'), user: fd.get('user'), pass: fd.get('pass'), from: fd.get('from'), secure: !!fd.get('secure') });
+        toast('Email settings saved', { kind: 'success' });
+        renderEmail();
+      } catch (err) { toast(err.message, { kind: 'error' }); }
+    });
+    $('[data-email-test]', body)?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try { const r = await T.api.post('/api/admin/email/test', {}); toast(`Test email sent to ${r.to}`, { kind: 'success' }); } catch (err) { toast(err.message, { kind: 'error', timeout: 9000 }); }
+      e.target.disabled = false;
+    });
+    $('[data-email-clear]', body)?.addEventListener('click', async () => {
+      if (!(await confirmDialog({ title: 'Turn off email?', body: 'People will only be notified inside Local Notes, and you’ll copy invitation links yourself.', confirm: 'Turn off' }))) return;
+      await T.api.put('/api/admin/email', { clear: true });
+      renderEmail();
+    });
   }
 
   function renderPeople(extra = '') {
@@ -850,7 +1022,8 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
       ${ws.length ? `<div class="field"><span>Workspaces</span><div class="adm-checks">${ws.map((w, i) => `<label><input type="checkbox" name="ws" value="${w.id}" ${i === 0 ? 'checked' : ''}>${esc(w.name)}</label>`).join('')}</div></div>` : ''}
       <div class="adm-row"><label class="field"><span>Access in those workspaces</span><select name="role"><option value="editor">Can edit</option><option value="viewer">Can view</option><option value="owner">Owner</option></select></label>
         <label class="adm-check"><input type="checkbox" name="isAdmin"><span>Server admin<em>Can add people and change server settings</em></span></label></div>
-      <div class="adm-actions"><button type="button" class="btn ghost" data-cancel>Cancel</button><button class="btn primary" type="submit">Add and get link</button></div>
+      ${data.emailOn ? '<label class="adm-check inline"><input type="checkbox" name="sendEmail" checked><span>Email them the link</span></label>' : ''}
+      <div class="adm-actions"><button type="button" class="btn ghost" data-cancel>Cancel</button><button class="btn primary" type="submit">${data.emailOn ? 'Add person' : 'Add and get link'}</button></div>
     </form>`;
     const f = $('.adm-form', body);
     setTimeout(() => $('[name=name]', f).focus(), 30);
@@ -859,9 +1032,10 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
       e.preventDefault();
       const fd = new FormData(f);
       try {
-        const r = await T.api.post('/api/admin/users', { name: fd.get('name'), email: fd.get('email'), role: fd.get('role'), isAdmin: !!fd.get('isAdmin'), workspaceIds: fd.getAll('ws') });
+        const r = await T.api.post('/api/admin/users', { name: fd.get('name'), email: fd.get('email'), role: fd.get('role'), isAdmin: !!fd.get('isAdmin'), workspaceIds: fd.getAll('ws'), sendEmail: !!fd.get('sendEmail'), baseUrl: shareBase() });
         await load();
-        renderPeople(linkBox(r.user, r.token, 'welcome'));
+        if (r.emailed) { toast(`${r.user.name} was added and emailed a link to choose their password`, { kind: 'success' }); renderPeople(); }
+        else renderPeople((r.emailError ? `<p class="adm-warn">${icon('warning', 14)}The email couldn’t be sent (${esc(r.emailError)}). Send the link below yourself.</p>` : '') + linkBox(r.user, r.token, 'welcome'));
         reloadMe().catch(() => {});
       } catch (err) { toast(err.message, { kind: 'error' }); }
     });
@@ -869,9 +1043,10 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
 
   async function personAction(u, act) {
     try {
-      if (act === 'link') {
-        const r = await T.api.post(`/api/admin/users/${u.id}/password-link`);
-        return renderPeople(linkBox(u, r.token, u.pendingSetup ? 'welcome' : 'reset'));
+      if (act === 'link' || act === 'email-link') {
+        const r = await T.api.post(`/api/admin/users/${u.id}/password-link`, { sendEmail: act === 'email-link', baseUrl: shareBase() });
+        if (r.emailed) { toast(`Emailed ${u.pendingSetup ? 'a new setup' : 'a password reset'} link to ${u.email}`, { kind: 'success' }); return; }
+        return renderPeople((r.emailError ? `<p class="adm-warn">${icon('warning', 14)}The email couldn’t be sent (${esc(r.emailError)}).</p>` : '') + linkBox(u, r.token, u.pendingSetup ? 'welcome' : 'reset'));
       }
       if (act === 'suspend' && !(await confirmDialog({ title: `Suspend ${u.name}?`, body: 'They’re signed out everywhere and can’t sign in until you restore access. Their pages stay where they are.', confirm: 'Suspend', danger: true }))) return;
       const patch = act === 'admin' ? { isAdmin: !u.isAdmin } : { disabled: act === 'suspend' };
@@ -899,6 +1074,10 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
         <label class="choice ${st.signup === 'invite' ? 'on' : ''}"><input type="radio" name="signup" value="invite" ${st.signup === 'invite' ? 'checked' : ''}><span class="choice-ic">${icon('lock', 18)}</span><span><strong>Only people you add or invite</strong><em>Recommended</em></span></label>
         <label class="choice ${st.signup === 'open' ? 'on' : ''}"><input type="radio" name="signup" value="open" ${st.signup === 'open' ? 'checked' : ''}><span class="choice-ic">${icon('users', 18)}</span><span><strong>Anyone who can reach this server</strong><em>They only see workspaces they’re added to</em></span></label>
       </div></div>
+      <div class="field"><span>Inviting people who aren’t on this server yet</span><div class="choice-list">
+        <label class="choice ${st.externalSharing !== 'admins' ? 'on' : ''}"><input type="radio" name="externalSharing" value="anyone" ${st.externalSharing !== 'admins' ? 'checked' : ''}><span class="choice-ic">${icon('share', 18)}</span><span><strong>Anyone who can edit a page</strong><em>Like Google Docs: type any email to invite them</em></span></label>
+        <label class="choice ${st.externalSharing === 'admins' ? 'on' : ''}"><input type="radio" name="externalSharing" value="admins" ${st.externalSharing === 'admins' ? 'checked' : ''}><span class="choice-ic">${icon('lock', 18)}</span><span><strong>Only server admins</strong><em>Others can share only with people already on the server</em></span></label>
+      </div></div>
       <div class="adm-actions"><button class="btn primary" type="submit">Save changes</button></div>
     </form>
     <div class="adm-facts">
@@ -913,7 +1092,7 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(f);
-      try { await T.api.patch('/api/admin/settings', { name: fd.get('name'), signup: fd.get('signup') }); toast('Settings saved', { kind: 'success' }); await load(); } catch (err) { toast(err.message, { kind: 'error' }); }
+      try { await T.api.patch('/api/admin/settings', { name: fd.get('name'), signup: fd.get('signup'), externalSharing: fd.get('externalSharing') }); toast('Settings saved', { kind: 'success' }); await load(); } catch (err) { toast(err.message, { kind: 'error' }); }
     });
   }
 
@@ -931,6 +1110,7 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
       return showMenu([
         { header: u.name },
         ...(!u.disabled ? [{ label: u.pendingSetup ? 'Copy a new setup link' : 'Password reset link', icon: u.pendingSetup ? 'user-plus' : 'lock', run: () => personAction(u, 'link') }] : []),
+        ...(!u.disabled && data.emailOn ? [{ label: u.pendingSetup ? 'Email a new setup link' : 'Email a password reset link', icon: 'mail', run: () => personAction(u, 'email-link') }] : []),
         { label: u.isAdmin ? 'Remove admin rights' : 'Make server admin', icon: 'drive', run: () => personAction(u, 'admin') },
         ...(u.id !== T.me.id ? ['sep', u.disabled ? { label: 'Restore access', icon: 'success', run: () => personAction(u, 'restore') } : { label: 'Suspend access…', icon: 'logout', danger: true, run: () => personAction(u, 'suspend') }] : []),
       ], pm, { align: 'end' });
@@ -942,6 +1122,67 @@ async function adminConsole(tab = 'people', { welcome = false } = {}) {
     }
   });
   show(tab);
+}
+
+// ================================================================== import into a workspace
+const dataUrl = (blob) => new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => resolve(null); r.readAsDataURL(blob); });
+
+async function pickTeamImport(wsId, parentId = null) {
+  if (window.desktop?.openFiles) {
+    const files = await window.desktop.openFiles();
+    if (files?.length) importIntoWorkspace(wsId, files.map((f) => new File([f.data], f.name)), parentId);
+    return;
+  }
+  const input = h(`<input type="file" multiple accept="${IMPORT_ACCEPT}" hidden>`);
+  document.body.append(input);
+  input.onchange = () => { importIntoWorkspace(wsId, [...input.files], parentId); input.remove(); };
+  input.click();
+}
+
+async function importIntoWorkspace(wsId, files, parentId = null) {
+  if (!wsId || !files.length) return;
+  if (parentId ? !canEditPage(findPage(parentId)) : !canEdit(wsId)) { toast('You have view-only access here'); return; }
+  const t = toast(files.length === 1 ? `Importing ${files[0].name}…` : `Importing ${files.length} files…`, { timeout: 0 });
+  let last = null;
+  const failed = [];
+  for (const file of files) {
+    try {
+      const r = await convertFile(file);
+      const urls = new Map();
+      for (const im of r.images) urls.set(im.id, im.blob.size <= 2 * 1024 * 1024 ? await dataUrl(im.blob) : null);
+      let md = linkImages(r.markdown, r.images, (im) => urls.get(im.id) || 'image-too-large');
+      md = md.replace(/!\[([^\]]*)\]\(image-too-large\)/g, '_[image “$1” was too large to import]_');
+      last = (await T.api.post(`/api/workspaces/${wsId}/pages`, { title: r.title, markdown: md, parentId })).page.id;
+    } catch (e) {
+      console.error(e);
+      failed.push(`${file.name}: ${e.message}`);
+    }
+  }
+  t?.remove();
+  await refreshWs(wsId);
+  renderSidebar();
+  if (last) {
+    await openPage(last);
+    const ok = files.length - failed.length;
+    toast(ok === 1 ? 'Imported 1 page' : `Imported ${ok} pages`, { kind: 'success' });
+  }
+  if (failed.length) toast(failed.join('\n'), { kind: 'error', timeout: 10000 });
+}
+
+function wireTeamDrop() {
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const target = () => T?.current?.page.workspaceId && canEditPage(T.current.page) ? T.current.page.workspaceId : (firstTeamWs()?.id || T?.workspaces[0]?.id);
+  T.dropHandlers = {
+    dragover: (e) => { if (T && hasFiles(e)) e.preventDefault(); },
+    drop: (e) => {
+      if (!T || !hasFiles(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      importIntoWorkspace(target(), [...e.dataTransfer.files]);
+    },
+  };
+  T.root.addEventListener('dragover', T.dropHandlers.dragover);
+  T.root.addEventListener('drop', T.dropHandlers.drop, true);
 }
 
 // ================================================================== workspaces
@@ -1176,114 +1417,287 @@ function peoplePicker({ roles = ['editor', 'viewer'], role = 'editor', button = 
   return el;
 }
 
+// Gmail-style "To:" field: chips for people, suggestions from the server and your address book
+// as you type, and any full email address can be added (they get an invitation).
+function emailPicker({ exclude = () => new Set(), allowNew = true, onChange = () => {} }) {
+  const el = h(`<div class="ep">
+    <div class="ep-box"><div class="ep-chips"></div><input class="ep-input" placeholder="Add people and emails" autocomplete="off" spellcheck="false"></div>
+    <div class="ep-list" hidden></div>
+  </div>`);
+  const input = $('.ep-input', el);
+  const list = $('.ep-list', el);
+  const chipsEl = $('.ep-chips', el);
+  const picked = new Map(); // email -> person
+  let results = [];
+  let active = 0;
+  let seq = 0;
+  const isEmail = (v) => /^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$/.test(v);
+  const label = (p) => p.name || p.email;
+  const renderChips = () => {
+    chipsEl.innerHTML = [...picked.values()].map((p) => `<span class="ep-chip ${p.onServer ? '' : 'new'}" data-email="${esc(p.email)}" title="${esc(p.onServer ? p.email : `${p.email} will get an invitation`)}">
+      ${p.onServer ? avatar(p, 20) : `<span class="ep-mail">${icon('mail', 12)}</span>`}<span>${esc(label(p))}</span><button type="button" data-unpick title="Remove">${icon('x', 12, 2.2)}</button></span>`).join('');
+    input.placeholder = picked.size ? '' : 'Add people and emails';
+    onChange([...picked.values()]);
+  };
+  const renderList = () => {
+    const q = input.value.trim();
+    const typedNew = isEmail(q) && !results.some((r) => r.email === q.toLowerCase());
+    const rows = [...results.map((p, i) => `<button type="button" class="ep-item ${i === active ? 'active' : ''}" data-i="${i}">
+        ${p.onServer ? avatar(p, 30) : `<span class="ep-av-mail">${icon('mail', 15)}</span>`}
+        <span class="ep-who"><strong>${esc(p.name || p.email)}</strong><span>${esc(p.name ? p.email : (p.onServer ? '' : 'Not on Local Notes yet'))}</span></span>
+        ${p.onServer ? '' : '<em class="ep-tag">Invite</em>'}</button>`)];
+    if (typedNew) rows.unshift(`<button type="button" class="ep-item ${active === -1 ? 'active' : ''}" data-new><span class="ep-av-mail">${icon('mail', 15)}</span><span class="ep-who"><strong>${esc(q)}</strong><span>${allowNew ? 'Send an invitation to this address' : 'Only admins can invite people who aren’t on this server'}</span></span></button>`);
+    if (!rows.length && q) rows.push(`<div class="ep-empty">No matches. Type a full email address to invite someone new.</div>`);
+    list.innerHTML = rows.join('');
+    list.hidden = !rows.length;
+  };
+  const add = (p) => {
+    if (!p?.email) return;
+    const email = p.email.toLowerCase();
+    if (exclude().has(email) || picked.has(email)) { toast(`${p.name || email} already has access`); return; }
+    if (!p.onServer && !allowNew) { toast('Only admins can invite people who aren’t on this server yet', { kind: 'error' }); return; }
+    picked.set(email, { ...p, email });
+    input.value = '';
+    results = [];
+    list.hidden = true;
+    renderChips();
+    input.focus();
+  };
+  const addTyped = () => {
+    const parts = input.value.split(/[,;\s]+/).map((x) => x.replace(/^<|>$/g, '').trim()).filter(Boolean);
+    let any = false;
+    for (const e of parts) if (isEmail(e)) { const known = results.find((r) => r.email === e.toLowerCase()); add(known || { email: e, name: '', onServer: false }); any = true; }
+    return any;
+  };
+  const search = async () => {
+    const q = input.value.trim();
+    const n = ++seq;
+    const { people } = await T.api.get(`/api/contacts?q=${encodeURIComponent(q)}`).catch(() => ({ people: [] }));
+    if (n !== seq) return;
+    const skip = exclude();
+    results = people.filter((p) => !picked.has(p.email) && !skip.has(p.email));
+    active = isEmail(q) && !results.some((r) => r.email === q.toLowerCase()) ? -1 : 0;
+    if (!q && !results.length) { list.hidden = true; return; }
+    renderList();
+  };
+  let timer;
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 90); });
+  input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; if (isEmail(input.value.trim())) addTyped(); }, 150));
+  input.addEventListener('paste', (e) => {
+    const text = e.clipboardData.getData('text');
+    if (/[,;\n]/.test(text) && /@/.test(text)) { e.preventDefault(); input.value = text; addTyped(); }
+  });
+  input.addEventListener('keydown', (e) => {
+    const hasNew = !!list.querySelector('[data-new]');
+    const max = results.length - 1;
+    if (e.key === 'ArrowDown' && !list.hidden) { e.preventDefault(); active = Math.min(max, active + 1); renderList(); }
+    else if (e.key === 'ArrowUp' && !list.hidden) { e.preventDefault(); active = Math.max(hasNew ? -1 : 0, active - 1); renderList(); }
+    else if (e.key === 'Enter' || e.key === 'Tab' || e.key === ',' || e.key === ';') {
+      if (!input.value.trim() && e.key === 'Tab') return;
+      if (!input.value.trim() && e.key === 'Enter') return;
+      e.preventDefault();
+      if (!list.hidden && active >= 0 && results[active]) add(results[active]);
+      else if (!addTyped() && e.key === 'Enter') toast('Type a full email address, like sam@company.com', { kind: 'error' });
+    } else if (e.key === 'Backspace' && !input.value && picked.size) {
+      picked.delete([...picked.keys()].pop());
+      renderChips();
+    } else if (e.key === 'Escape' && !list.hidden) { e.stopPropagation(); list.hidden = true; }
+  });
+  list.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    if (e.target.closest('[data-new]')) { addTyped(); return; }
+    const b = e.target.closest('[data-i]');
+    if (b) add(results[+b.dataset.i]);
+  });
+  chipsEl.addEventListener('click', (e) => { const b = e.target.closest('[data-unpick]'); if (b) { picked.delete(b.closest('[data-email]').dataset.email); renderChips(); input.focus(); } });
+  el.addEventListener('click', (e) => { if (e.target.closest('.ep-box') && !e.target.closest('button')) input.focus(); });
+  el.focus = () => input.focus();
+  el.people = () => { addTyped(); return [...picked.values()]; };
+  el.clear = () => { picked.clear(); input.value = ''; renderChips(); };
+  return el;
+}
+
 async function pageShareDialog(pageId) {
-  const box = h(`<div class="share page-share">
-    <div class="share-head"><div><h2>Share “<span class="ps-title"></span>”</h2><p class="ps-sub">Loading…</p></div>
-      <button class="icon-btn" data-close>${icon('x', 18)}</button></div>
-    <div class="ps-picker"></div>
-    <div class="share-members"><div class="pk-label">People with access</div><div class="share-list"></div></div>
-    <div class="ps-general"></div>
-    <div class="ps-foot">
-      <button class="btn ghost small" data-copy-link>${icon('link', 15)}<span>Copy link</span></button>
-      <span class="ps-foot-note"></span>
-      <button class="btn ghost small" data-ws-share hidden>${icon('users', 15)}<span></span></button>
+  const box = h(`<div class="share gshare">
+    <div class="share-head"><div><h2>Share “<span class="ps-title"></span>”</h2></div>
+      <button class="icon-btn" data-close title="Close">${icon('x', 18)}</button></div>
+    <div class="gs-add"><div class="gs-picker"></div><select class="gs-role" hidden><option value="editor">Editor</option><option value="viewer">Viewer</option></select></div>
+    <div class="gs-compose" hidden>
+      <label class="gs-notify"><input type="checkbox" checked><span>Notify people</span></label>
+      <textarea class="gs-message" rows="3" placeholder="Message (optional)"></textarea>
+      <p class="gs-note"></p>
+    </div>
+    <div class="gs-main">
+      <div class="gs-result"></div>
+      <div class="pk-label">People with access</div>
+      <div class="share-list gs-people"></div>
+      <div class="ps-general"></div>
+    </div>
+    <div class="gs-foot">
+      <button class="btn ghost" data-copy-link>${icon('link', 15)}<span>Copy link</span></button>
+      <span class="gs-spacer"></span>
+      <button class="btn ghost" data-ws-share hidden>${icon('users', 15)}<span></span></button>
+      <button class="btn ghost" data-cancel hidden>Cancel</button>
+      <button class="btn primary" data-done>Done</button>
     </div>
   </div>`);
-  const m = openModal(box, { className: 'share-modal' });
-  $('[data-close]', box).onclick = () => m.close();
-  $('[data-copy-link]', box).onclick = () => copyLink(pageId);
+  const m = openModal(box, { className: 'share-modal gshare-modal' });
   let data;
+  let composing = false;
+  const close = () => m.close();
+  $('[data-close]', box).onclick = close;
+  $('[data-copy-link]', box).onclick = () => copyLink(pageId);
+  const setCompose = (on) => {
+    composing = on;
+    $('.gs-compose', box).hidden = !on;
+    $('.gs-main', box).hidden = on;
+    $('.gs-role', box).hidden = !on;
+    $('[data-cancel]', box).hidden = !on;
+    $('[data-copy-link]', box).hidden = on;
+    $('[data-ws-share]', box).hidden = on || !data || data.workspace.kind === 'private' || !wsById(data.workspace.id);
+    $('[data-done]', box).textContent = on ? ($('.gs-notify input', box).checked ? 'Send' : 'Share') : 'Done';
+  };
   const changed = async () => {
     T.people.delete(pageId);
-    const ws = data?.workspace.id;
-    if (ws) await refreshWs(ws).catch(() => {});
+    if (data?.workspace.id) await refreshWs(data.workspace.id).catch(() => {});
     renderSidebar();
     await render();
   };
+  const picker = emailPicker({
+    exclude: () => new Set([...(data?.people || []).filter((u) => u.via !== 'member').map((u) => u.email), ...(data?.pending || []).map((x) => x.email), T.me.email]),
+    allowNew: true,
+    onChange: (people) => setCompose(people.length > 0),
+  });
+  $('.gs-picker', box).append(picker);
+
   const render = async () => {
-    try { data = await T.api.get(`/api/pages/${pageId}/access`); } catch (e) { toast(e.message, { kind: 'error' }); m.close(); return; }
+    try { data = await T.api.get(`/api/pages/${pageId}/access`); } catch (e) { toast(e.message, { kind: 'error' }); close(); return; }
     const page = findPage(pageId) || T.current?.page;
     $('.ps-title', box).textContent = page?.title || 'Untitled';
     const ws = data.workspace;
     const priv = ws.kind === 'private';
     const restricted = data.mode === 'restricted' || !!data.restrictedBy;
-    $('.ps-sub', box).textContent = priv ? 'In your private space. Only you and people you invite can open it.'
-      : restricted ? 'Only the people below can open this page and its subpages.'
-        : `Everyone in ${ws.name} can open it. Invite others to give them access to just this page.`;
-    // picker
-    const holder = $('.ps-picker', box);
-    if (data.canManage && !holder.firstChild) {
-      holder.append(peoplePicker({
-        exclude: () => new Set(data.people.filter((u) => u.via !== 'member' || restricted).map((u) => u.id)),
-        onAdd: async (users, role) => {
-          for (const u of users) await T.api.post(`/api/pages/${pageId}/shares`, { userId: u.id, role });
-          toast(users.length === 1 ? `Shared with ${users[0].name}` : `Shared with ${users.length} people`, { kind: 'success' });
-          await changed();
-        },
-      }));
-      setTimeout(() => holder.firstChild?.focus(), 40);
-    }
-    // people: invited people, owners, and (for restricted pages) everyone who can still see it.
-    // On open team pages, the rest of the workspace is summarised in one row.
-    const listed = data.people.filter((u) => u.via === 'share' || u.via === 'owner' || restricted || priv);
+    $('.gs-add', box).hidden = !data.canShare;
+    $('.gs-note', box).textContent = data.emailOn ? 'People get an email with a link. People without an account get an invitation to join.'
+      : 'Email isn’t set up on this server, so people are notified inside Local Notes. People without an account get an invitation link to send them yourself.';
+    // people
+    const listed = data.people.filter((u) => u.via !== 'member' || restricted || priv);
     const rest = data.people.length - listed.length;
     const roleCell = (u) => {
-      if (u.removable && data.canManage) return `<select data-share-role>${['editor', 'viewer'].map((r) => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
-        <button class="icon-btn" data-unshare title="Remove access">${icon('x', 16)}</button>`;
-      if (u.removable && u.id === T.me.id) return `<span class="member-role">${ROLE_LABEL[u.role]}</span><button class="icon-btn" data-unshare title="Remove yourself">${icon('logout', 15)}</button>`;
-      return `<span class="member-role">${ROLE_LABEL[u.role]}</span><span class="member-gap"></span>`;
+      if (u.removable && data.canManage) return `<select data-share-role>${['editor', 'viewer'].map((r) => `<option value="${r}" ${r === u.role ? 'selected' : ''}>${r === 'editor' ? 'Editor' : 'Viewer'}</option>`).join('')}<option value="remove">Remove access</option></select>`;
+      if (u.removable && u.id === T.me.id) return `<span class="member-role">${u.role === 'editor' ? 'Editor' : 'Viewer'}</span><button class="icon-btn" data-unshare title="Remove yourself">${icon('logout', 15)}</button>`;
+      return `<span class="member-role">${u.role === 'owner' ? 'Owner' : u.role === 'editor' ? 'Editor' : 'Viewer'}</span>`;
     };
-    const why = (u) => u.inheritedFrom ? `Access from “${esc(u.inheritedFrom)}”`
-      : u.via === 'owner' ? (priv ? 'Owner' : `Owner of ${esc(ws.name)}`)
-        : u.via === 'member' ? `Member of ${esc(ws.name)}` : esc(u.email || '');
-    $('.share-list', box).innerHTML = listed.map((u) => `<div class="member" data-user="${u.id}">
-        ${avatar(u, 32)}<div class="member-info"><strong>${esc(u.name)}${u.id === T.me.id ? ' <em>(you)</em>' : ''}</strong><span>${why(u)}</span></div>
-        ${roleCell(u)}</div>`).join('')
-      + (rest > 0 ? `<div class="member everyone"><span class="share-ic">${icon('library', 17)}</span><div class="member-info"><strong>Everyone in ${esc(ws.name)}</strong><span>${rest} more ${rest === 1 ? 'person' : 'people'}</span></div><span class="member-role">From workspace</span><span class="member-gap"></span></div>` : '');
+    const why = (u) => (u.inheritedFrom ? `${esc(u.email)} · from “${esc(u.inheritedFrom)}”` : u.via === 'link' ? `${esc(u.email)} · opened with the link` : esc(u.email || ''));
+    $('.gs-people', box).innerHTML = listed.map((u) => `<div class="member" data-user="${u.id}">
+        ${avatar(u, 32)}<div class="member-info"><strong>${esc(u.name)}${u.id === T.me.id ? ' <em>(you)</em>' : ''}</strong><span>${why(u)}</span></div>${roleCell(u)}</div>`).join('')
+      + (data.pending || []).map((x) => `<div class="member pending" data-invite="${esc(x.email)}">
+        <span class="ep-av-mail big">${icon('mail', 15)}</span><div class="member-info"><strong>${esc(x.email)}</strong><span>Invited · hasn’t joined yet</span></div>
+        ${data.canManage ? `<select data-invite-role>${['editor', 'viewer'].map((r) => `<option value="${r}" ${r === x.role ? 'selected' : ''}>${r === 'editor' ? 'Editor' : 'Viewer'}</option>`).join('')}<option value="copy">Copy invitation link</option><option value="remove">Cancel invitation</option></select>` : `<span class="member-role">${x.role === 'editor' ? 'Editor' : 'Viewer'}</span>`}</div>`).join('')
+      + (rest > 0 ? `<div class="member everyone"><span class="share-ic">${icon('library', 17)}</span><div class="member-info"><strong>Everyone in ${esc(ws.name)}</strong><span>${rest} more ${rest === 1 ? 'person' : 'people'}</span></div><span class="member-role">From workspace</span></div>` : '');
     // general access
     const gen = $('.ps-general', box);
-    if (priv) gen.innerHTML = '';
-    else if (data.restrictedBy) {
-      gen.innerHTML = `<div class="pk-label">General access</div><div class="ga-row"><span class="ga-ic restricted">${icon('lock', 17)}</span><div class="member-info"><strong>Only people invited</strong><span>Set on the parent page “${esc(data.restrictedBy.title)}”.</span></div>
-        <button class="btn ghost small" data-open-parent="${data.restrictedBy.id}">Open</button></div>`;
+    const current = data.linkRole ? 'link' : priv || restricted ? 'restricted' : 'workspace';
+    const opts = [['restricted', priv ? 'Restricted' : 'Only people invited'], ...(priv ? [] : [['workspace', `Everyone in ${ws.name}`]]), ['link', 'Anyone with the link']];
+    const desc = {
+      restricted: priv ? 'Only people with access can open it' : 'Only the people above can open it. Hidden from the rest of the workspace.',
+      workspace: `Everyone in ${ws.name} can open it (${ws.members} member${ws.members === 1 ? '' : 's'})`,
+      link: `Anyone on this server who has the link can ${data.linkRole === 'editor' ? 'edit' : 'view'}${priv ? '' : `, plus everyone in ${ws.name}`}`,
+    };
+    if (data.restrictedBy && !data.linkRole) {
+      gen.innerHTML = `<div class="pk-label">General access</div><div class="ga-row"><span class="ga-ic restricted">${icon('lock', 17)}</span><div class="member-info"><strong>Only people invited</strong><span>Set on the parent page “${esc(data.restrictedBy.title)}”.</span></div><button class="btn ghost small" data-open-parent="${data.restrictedBy.id}">Open</button></div>`;
     } else {
-      gen.innerHTML = `<div class="pk-label">General access</div><div class="ga-row"><span class="ga-ic ${restricted ? 'restricted' : ''}">${icon(restricted ? 'lock' : 'library', 17)}</span>
-        <div class="member-info">${data.canManage ? `<select data-mode><option value="workspace" ${!restricted ? 'selected' : ''}>Everyone in ${esc(ws.name)}</option><option value="restricted" ${restricted ? 'selected' : ''}>Only people invited</option></select>`
-          : `<strong>${restricted ? 'Only people invited' : `Everyone in ${esc(ws.name)}`}</strong>`}
-        <span>${restricted ? 'Hidden from the rest of the workspace, including search and graph.' : `${ws.members} member${ws.members === 1 ? '' : 's'} · their workspace role applies`}</span></div></div>`;
+      gen.innerHTML = `<div class="pk-label">General access</div><div class="ga-row"><span class="ga-ic ${current === 'restricted' ? 'restricted' : current === 'link' ? 'link' : ''}">${icon(current === 'link' ? 'globe' : current === 'restricted' ? 'lock' : 'library', 17)}</span>
+        <div class="member-info">${data.canManage ? `<select data-general>${opts.map(([k, l]) => `<option value="${k}" ${k === current ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : `<strong>${esc(opts.find(([k]) => k === current)?.[1] || '')}</strong>`}
+        <span>${esc(desc[current])}</span></div>
+        ${current === 'link' && data.canManage ? `<select data-link-role class="ga-role"><option value="viewer" ${data.linkRole === 'viewer' ? 'selected' : ''}>Viewer</option><option value="editor" ${data.linkRole === 'editor' ? 'selected' : ''}>Editor</option></select>` : ''}</div>
+        ${data.linkInheritedFrom && !data.linkRole ? `<p class="gs-hint">${icon('info', 13)}Anyone with the link to “${esc(data.linkInheritedFrom.title)}” can also open this page.</p>` : ''}`;
     }
-    $('.ps-foot-note', box).innerHTML = data.canManage ? '' : 'Only the page’s creator or a workspace owner can change access.';
     const wsBtn = $('[data-ws-share]', box);
-    wsBtn.hidden = priv || !wsById(ws.id);
-    $('span', wsBtn).textContent = `${ws.name} members`;
-    wsBtn.onclick = () => { m.close(); shareDialog(ws.id); };
+    $('span', wsBtn).textContent = 'Workspace members';
+    setCompose(composing);
   };
-  box.addEventListener('change', async (e) => {
-    const sel = e.target.closest('[data-share-role]');
-    const mode = e.target.closest('[data-mode]');
+
+  const send = async () => {
+    const people = picker.people();
+    if (!people.length) return;
+    const btn = $('[data-done]', box);
+    btn.disabled = true;
     try {
-      if (sel) { await T.api.patch(`/api/pages/${pageId}/shares/${sel.closest('[data-user]').dataset.user}`, { role: sel.value }); toast('Access updated', { kind: 'success' }); await changed(); }
-      if (mode) {
-        await T.api.put(`/api/pages/${pageId}/access`, { mode: mode.value });
-        toast(mode.value === 'restricted' ? 'Now only invited people can open this page' : 'Everyone in the workspace can open this page', { kind: 'success' });
+      const r = await T.api.post(`/api/pages/${pageId}/shares`, {
+        people: people.map((p) => (p.id ? { userId: p.id } : { email: p.email, name: p.name })),
+        role: $('.gs-role', box).value,
+        notify: $('.gs-notify input', box).checked,
+        message: $('.gs-message', box).value,
+        baseUrl: shareBase(),
+      });
+      const errors = r.results.filter((x) => x.error);
+      const invitedNoEmail = r.results.filter((x) => x.invited && !x.emailed);
+      const sharedCount = r.results.filter((x) => x.shared || x.invited).length;
+      picker.clear();
+      $('.gs-message', box).value = '';
+      await changed();
+      if (sharedCount) toast(sharedCount === 1 ? `Shared with ${r.results.find((x) => x.shared || x.invited).name || r.results.find((x) => x.shared || x.invited).email}` : `Shared with ${sharedCount} people`, { kind: 'success' });
+      if (errors.length) toast(errors.map((x) => `${x.email}: ${x.error}`).join('\n'), { kind: 'error', timeout: 8000 });
+      $('.gs-result', box).innerHTML = invitedNoEmail.length ? `<div class="adm-link pop"><div class="adm-link-head">${icon('mail', 16)}<strong>Send ${invitedNoEmail.length === 1 ? 'this invitation' : 'these invitations'} yourself</strong></div>
+        <p>${r.emailOn ? 'The email couldn’t be sent.' : 'Email isn’t set up on this server.'} Copy the link and send it by email or chat. It works for 30 days.</p>
+        ${invitedNoEmail.map((x) => `<div class="gs-invite"><span>${esc(x.email)}</span><div class="share-link"><input readonly value="${esc(x.link)}"><button class="btn primary small" data-copy-text="${esc(x.link)}">${icon('copy', 15)}<span>Copy</span></button></div></div>`).join('')}</div>` : '';
+    } catch (e) { toast(e.message, { kind: 'error' }); }
+    btn.disabled = false;
+  };
+
+  box.addEventListener('change', async (e) => {
+    if (e.target.closest('.gs-notify')) { setCompose(composing); return; }
+    const sel = e.target.closest('[data-share-role]');
+    const inv = e.target.closest('[data-invite-role]');
+    const gen = e.target.closest('[data-general]');
+    const lr = e.target.closest('[data-link-role]');
+    try {
+      if (sel) {
+        const uid = sel.closest('[data-user]').dataset.user;
+        if (sel.value === 'remove') await T.api.del(`/api/pages/${pageId}/shares/${uid}`);
+        else await T.api.patch(`/api/pages/${pageId}/shares/${uid}`, { role: sel.value });
+        toast(sel.value === 'remove' ? 'Access removed' : 'Access updated', { kind: 'success' });
         await changed();
       }
+      if (inv) {
+        const email = inv.closest('[data-invite]').dataset.invite;
+        if (inv.value === 'copy') { const r = await T.api.post(`/api/pages/${pageId}/invites/link`, { email, baseUrl: shareBase() }); await copy(r.link, 'Invitation link copied'); }
+        else if (inv.value === 'remove') { await T.api.del(`/api/pages/${pageId}/invites?email=${encodeURIComponent(email)}`); toast('Invitation cancelled'); }
+        else { await T.api.patch(`/api/pages/${pageId}/invites`, { email, role: inv.value }); toast('Invitation updated', { kind: 'success' }); }
+        await changed();
+      }
+      if (gen) {
+        const priv = data.workspace.kind === 'private';
+        const body = gen.value === 'link' ? { linkRole: data.linkRole || 'viewer', ...(priv ? {} : { mode: 'workspace' }) }
+          : { linkRole: null, ...(priv ? {} : { mode: gen.value }) };
+        await T.api.put(`/api/pages/${pageId}/access`, body);
+        toast(gen.value === 'link' ? 'Anyone with the link can now open this page' : gen.value === 'restricted' ? 'Now only invited people can open this page' : 'Everyone in the workspace can open this page', { kind: 'success' });
+        await changed();
+      }
+      if (lr) { await T.api.put(`/api/pages/${pageId}/access`, { linkRole: lr.value }); toast(`Anyone with the link can ${lr.value === 'editor' ? 'edit' : 'view'}`, { kind: 'success' }); await changed(); }
     } catch (err) { toast(err.message, { kind: 'error' }); render(); }
   });
   box.addEventListener('click', async (e) => {
-    const rm = e.target.closest('[data-unshare]');
     const parent = e.target.closest('[data-open-parent]');
-    if (parent) { m.close(); openPage(parent.dataset.openParent); return; }
+    if (parent) { close(); openPage(parent.dataset.openParent); return; }
+    const ct = e.target.closest('[data-copy-text]');
+    if (ct) { copy(ct.dataset.copyText, 'Link copied'); return; }
+    if (e.target.closest('[data-ws-share]')) { close(); shareDialog(data.workspace.id); return; }
+    if (e.target.closest('[data-cancel]')) { picker.clear(); return; }
+    if (e.target.closest('[data-done]')) { if (composing) send(); else close(); return; }
+    const rm = e.target.closest('[data-unshare]');
     if (!rm) return;
     const uid = rm.closest('[data-user]').dataset.user;
     if (uid === T.me.id && !(await confirmDialog({ title: 'Remove your access?', body: 'You won’t be able to open this page until someone shares it with you again.', confirm: 'Remove', danger: true }))) return;
     try {
       await T.api.del(`/api/pages/${pageId}/shares/${uid}`);
-      if (uid === T.me.id) { m.close(); await loadShared(); renderSidebar(); checkCurrent(); return; }
+      if (uid === T.me.id) { close(); await loadShared(); renderSidebar(); checkCurrent(); return; }
       await changed();
     } catch (err) { toast(err.message, { kind: 'error' }); }
   });
   await render();
+  setTimeout(() => picker.focus(), 40);
 }
 
 // Workspaces a page can be moved into: ones where you can add pages, other than its own.
@@ -1351,6 +1765,7 @@ function isDescendant(id, ancestor) {
 function closePage() {
   const c = T?.current;
   if (!c) return;
+  closeFindBar();
   pushMarkdown(true);
   c.provider.destroy();
   c.editor.destroy();
@@ -1584,6 +1999,10 @@ function pageMenu(anchor) {
     ...(edit && moveTargets(c.page).length ? [{ label: 'Move to…', icon: 'move', run: () => moveMenu(c.page.id, anchor) }] : []),
     { label: 'Copy link', icon: 'link', run: () => copyLink(c.page.id) },
     { label: 'Copy as markdown', icon: 'code', run: () => copy(getMarkdown(c.editor), 'Markdown copied') },
+    { label: 'Export…', icon: 'file-down', run: () => showMenu([{ header: 'Export as' }, ...exportMenuItems(() => ({ editor: c.editor, title: c.page.title, markdown: getMarkdown(c.editor) }))], anchor, { align: 'end' }) },
+    { label: 'Print…', icon: 'printer', run: () => printPage({ editor: c.editor, title: c.page.title }) },
+    { label: 'Find in page', icon: 'search', hint: `${modKey}+F`, run: () => openFindBar(c.editor) },
+    ...(edit ? [{ label: 'Find and replace', icon: 'replace', hint: `${modKey}+H`, run: () => openFindBar(c.editor, { replace: true }) }] : []),
     { label: 'Version history', icon: 'clock', run: () => openDrawer('history') },
     { label: 'Summarize with AI', icon: 'sparkles', run: () => summarizePage(c.editor, 'summary') },
     { label: 'Find action items with AI', icon: 'todo', run: () => summarizePage(c.editor, 'actions') },
@@ -1919,7 +2338,7 @@ async function renderInbox() {
       ${notifications.length ? notifications.map((n) => `<button class="notif ${n.readAt ? '' : 'unread'}" data-notif data-id="${n.id}" data-page="${n.pageId || ''}" data-thread="${n.threadId || ''}">
         ${avatar({ name: n.actorName, color: n.actorColor }, 30)}
         <span class="notif-main"><span class="notif-line"><strong>${esc(n.actorName || 'Someone')}</strong> ${verb[n.kind] || ''} <strong>${esc(byWs(n.kind) ? n.workspaceName || '' : n.pageTitle || 'a page')}</strong>${n.kind === 'shared' ? ' with you' : ''}</span>
-          ${n.text && !byWs(n.kind) && n.kind !== 'shared' ? `<span class="notif-text">${esc(n.text)}</span>` : ''}
+          ${n.text && !byWs(n.kind) && !(n.kind === 'shared' && /shared “/.test(n.text)) ? `<span class="notif-text">${esc(n.text)}</span>` : ''}
           <span class="notif-time">${timeAgo(n.createdAt / 1000)}${n.workspaceName ? ` · ${esc(n.workspaceName)}` : ''}</span></span>
       </button>`).join('') : `<div class="drawer-empty">${icon('note', 28, 1.4)}<strong>You’re all caught up</strong><span>Mentions, replies and pages shared with you show up here.</span></div>`}
     </div>`;
@@ -2056,3 +2475,5 @@ function hideGraph() {
 }
 
 export const teamActive = () => !!T;
+// Save the open team page's markdown copy now (before the app quits).
+export async function flushTeam() { if (T?.current) await pushMarkdown(true); }

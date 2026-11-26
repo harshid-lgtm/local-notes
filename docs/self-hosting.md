@@ -82,7 +82,10 @@ Server admins open it from their account menu (top-left) → **Server admin**. I
 - **People:** **Add person** creates an account and gives you a link to send them; they open it and choose their own password. From a person's `•••` menu you can make a **password reset link**, make them a server admin, or **suspend access** (signs them out everywhere until you restore it).
 - **Workspaces:** every team workspace with its members and owners. **Join as owner** lets you manage one whose owners have left.
 - **Server:** the team name, who can create an account, the address to give teammates, and where the data is stored.
+- **Email:** connect your email server (SMTP) so the server can send invitations, share notifications and password links. Use your company's mail server or a provider such as Microsoft 365, Google Workspace, Brevo or SendGrid. **Send test email** checks it works. Without email, people are notified inside Local Notes and you copy invitation links yourself.
 - **AI:** choose the AI provider and key everyone uses.
+
+The **Server** tab also chooses who may invite people who aren't on the server yet: anyone who can edit a page (like Google Docs), or only admins.
 
 ## Docker (with HTTPS)
 

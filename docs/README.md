@@ -7,6 +7,7 @@ Local Notes is a calm, Notion-style editor for plain markdown files. Your notes 
 - [Getting started](getting-started.md) — install the app, open a vault, find your way around
 - [Writing](writing.md) — blocks, the slash menu, formatting, tables, callouts
 - [Organizing](organizing.md) — folders, subpages, favorites, search and commands
+- [Import, open & export](import-export.md) — Word, PDF, Excel, PowerPoint and more in; PDF, Word, HTML out
 
 ## Go further
 

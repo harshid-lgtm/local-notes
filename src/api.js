@@ -37,5 +37,7 @@ export const api = {
   daily: () => req('GET', '/api/daily'),
   createVault: (parent, name) => req('POST', '/api/vault/create', { parent, name }),
   forgetVault: (path) => req('POST', '/api/vault/forget', { path }),
+  attach: (name, data, noteFolder) => req('POST', '/api/attachment', { name, data, noteFolder }),
+  fetchUrl: (url) => req('POST', '/api/fetch-url', { url }),
   fileUrl: (path) => `/api/file?${q({ path })}`,
 };

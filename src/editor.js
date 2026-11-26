@@ -29,6 +29,7 @@ import { createLowlight, common } from 'lowlight';
 import Collaboration from '@tiptap/extension-collaboration';
 import CollaborationCursor from '@tiptap/extension-collaboration-cursor';
 import { Mark } from '@tiptap/core';
+import { FindReplace } from './find.js';
 import { icon } from './icons.js';
 import { esc, h } from './ui.js';
 
@@ -293,12 +294,46 @@ const WikiEmbed = Node.create({
 // bits of HTML Obsidian understands: <u>text</u> and <mark style="background: #hex;">text</mark>
 // (the format of Obsidian's Highlightr plugin). Plain yellow stays ==text==.
 const SAFE_COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\)|[a-z]+)$/i;
+const SAFE_SIZE = /^\d{1,3}(\.\d+)?(px|pt|em|rem|%)$/i;
+// Text colour and size: <span style="color: #hex; font-size: 20px;">text</span>
+// browsers report colours as rgb(); keep files tidy with #hex
+function toHex(c) {
+  const m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(c);
+  if (!m || (m[4] !== undefined && Number(m[4]) < 1)) return c;
+  return `#${[m[1], m[2], m[3]].map((n) => Math.min(255, +n).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+}
+function parseStyle(style = '') {
+  const out = { color: null, fontSize: null };
+  for (const part of String(style).split(';')) {
+    const [k, ...v] = part.split(':');
+    const key = (k || '').trim().toLowerCase();
+    const val = v.join(':').trim();
+    if (key === 'color' && SAFE_COLOR.test(val)) out.color = toHex(val);
+    if (key === 'font-size' && SAFE_SIZE.test(val)) out.fontSize = val;
+  }
+  return out;
+}
+const styleString = (color, fontSize) => [color && `color: ${color};`, fontSize && `font-size: ${fontSize};`].filter(Boolean).join(' ');
 function htmlMarksMarkdownIt(md) {
   if (md.__lnHtmlMarks) return;
   md.__lnHtmlMarks = true;
   md.inline.ruler.after('html_inline', 'ln_html_marks', (state, silent) => {
     if (state.src.charCodeAt(state.pos) !== 0x3c /* < */) return false;
-    const m = /^<(\/?u|\/mark|mark(?:\s+(?:style="background(?:-color)?:\s*([^";]+?);?\s*"|data-color="([^"]+)"))?)>/i.exec(state.src.slice(state.pos));
+    const rest = state.src.slice(state.pos);
+    const span = /^<span\s+style="([^"]*)">|^<\/span>/i.exec(rest);
+    if (span) {
+      if (!silent) {
+        const t = state.push('html_inline', '', 0);
+        if (span[0].startsWith('</')) t.content = '</span>';
+        else {
+          const st = parseStyle(span[1]);
+          t.content = `<span style="${styleString(st.color, st.fontSize)}">`;
+        }
+      }
+      state.pos += span[0].length;
+      return true;
+    }
+    const m = /^<(\/?u|\/mark|mark(?:\s+(?:style="background(?:-color)?:\s*([^";]+?);?\s*"|data-color="([^"]+)"))?)>/i.exec(rest);
     if (!m) return false;
     if (!silent) {
       const t = state.push('html_inline', '', 0);
@@ -335,6 +370,45 @@ const MarkdownUnderline = Underline.extend({
     return {
       markdown: {
         serialize: { open: '<u>', close: '</u>', mixable: true, expelEnclosingWhitespace: true },
+        parse: { setup: htmlMarksMarkdownIt },
+      },
+    };
+  },
+});
+
+const TextStyleMark = Mark.create({
+  name: 'textStyle',
+  priority: 120,
+  addAttributes() {
+    return {
+      color: { default: null, parseHTML: (el) => parseStyle(el.getAttribute('style')).color },
+      fontSize: { default: null, parseHTML: (el) => parseStyle(el.getAttribute('style')).fontSize },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'span[style]', getAttrs: (el) => { const st = parseStyle(el.getAttribute('style')); return st.color || st.fontSize ? null : false; } }];
+  },
+  renderHTML({ mark }) {
+    return ['span', { style: styleString(mark.attrs.color, mark.attrs.fontSize) }, 0];
+  },
+  addCommands() {
+    // set one attribute, keep the other; drop the mark when both are empty
+    const set = (key) => (value) => ({ editor, chain }) => {
+      const cur = editor.getAttributes('textStyle');
+      const next = { color: cur.color || null, fontSize: cur.fontSize || null, [key]: value || null };
+      return next.color || next.fontSize ? chain().setMark('textStyle', next).run() : chain().unsetMark('textStyle').run();
+    };
+    return { setTextColor: set('color'), setFontSize: set('fontSize') };
+  },
+  addStorage() {
+    return {
+      markdown: {
+        serialize: {
+          open: (_state, mark) => `<span style="${styleString(mark.attrs.color, mark.attrs.fontSize)}">`,
+          close: '</span>',
+          mixable: true,
+          expelEnclosingWhitespace: true,
+        },
         parse: { setup: htmlMarksMarkdownIt },
       },
     };
@@ -644,7 +718,7 @@ export function createEditor({ element, bubble, onUpdate, collab = null, editabl
       Table.configure({ resizable: false }),
       TableRow, TableHeader, TableCell,
       CodeBlock,
-      MarkdownHighlight, MarkdownUnderline,
+      MarkdownHighlight, MarkdownUnderline, TextStyleMark, FindReplace,
       WikiLink, WikiEmbed,
       Decorations,
       SlashCommand, WikiSuggest, Shortcuts,

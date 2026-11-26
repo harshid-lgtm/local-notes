@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS notif_user ON notifications(user_id, read_at);
 CREATE TABLE IF NOT EXISTS settings ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
+CREATE TABLE IF NOT EXISTS page_invites (
+  token TEXT PRIMARY KEY, page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE, email TEXT NOT NULL,
+  role TEXT NOT NULL, invited_by TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS invites_email ON page_invites(email);
+CREATE TABLE IF NOT EXISTS contacts (
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, email TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'shared', last_used INTEGER, created_at INTEGER NOT NULL, PRIMARY KEY (owner_id, email)
+);
 CREATE TABLE IF NOT EXISTS password_links (
   token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL, created_by TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
@@ -82,6 +91,9 @@ export function openDb(dataDir) {
   if (!cols.includes('access')) db.exec("ALTER TABLE pages ADD COLUMN access TEXT NOT NULL DEFAULT 'workspace'");
   const ucols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!ucols.includes('disabled_at')) db.exec('ALTER TABLE users ADD COLUMN disabled_at INTEGER');
+  if (!cols.includes('link_role')) db.exec('ALTER TABLE pages ADD COLUMN link_role TEXT');
+  const scols = db.prepare('PRAGMA table_info(page_shares)').all().map((c) => c.name);
+  if (!scols.includes('kind')) db.exec("ALTER TABLE page_shares ADD COLUMN kind TEXT NOT NULL DEFAULT 'direct'");
   const cache = new Map();
   const prep = (sql) => {
     if (!cache.has(sql)) cache.set(sql, db.prepare(sql));

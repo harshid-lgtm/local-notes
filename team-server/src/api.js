@@ -5,6 +5,7 @@ import os from 'node:os';
 import { newId, now } from './db.js';
 import { hashPassword, checkPassword, newToken, hashToken, pickColor, rateLimit } from './auth.js';
 import { subscribe, sendTo } from './events.js';
+import { sendEmail, emailConfigured } from './mailer.js';
 import Anthropic from '@anthropic-ai/sdk';
 import aiLib from '../../server/ai.js';
 
@@ -256,6 +257,47 @@ export function createApi({ db, config, collab }) {
   const pendingAuthors = new Map(); // pageId -> Set<userId> since last version
 
   // ---------------------------------------------------------------- notifications
+  // ---------------------------------------------------------------- email, contacts, invitations
+  const emailSettings = () => { try { return JSON.parse(db.get("SELECT value FROM settings WHERE key = 'email'")?.value || '{}'); } catch { return {}; } };
+  const emailOn = () => emailConfigured(emailSettings());
+  // Where links in emails point: what the sender's app uses, a configured PUBLIC_URL, or this request's host.
+  function baseUrlFor(req, body) {
+    const b = String(body?.baseUrl || '');
+    if (/^https?:\/\/[^\s/]+$/i.test(b.replace(/\/+$/, '')) && !/^https?:\/\/(localhost|127\.|\[::1\])/i.test(b)) return b.replace(/\/+$/, '');
+    if (config.publicUrl) return config.publicUrl;
+    const proto = req.headers['x-forwarded-proto'] || 'http';
+    return `${proto}://${req.headers['x-forwarded-host'] || req.headers.host}`;
+  }
+  // Send without failing the request; report what happened.
+  async function mail(to, subject, content, replyTo) {
+    if (!emailOn()) return { emailed: false };
+    try { await sendEmail(emailSettings(), { to, subject, replyTo, ...content }); return { emailed: true }; }
+    catch (e) { console.error('email failed:', e.message); return { emailed: false, emailError: e.message }; }
+  }
+  function rememberContact(ownerId, email, name = '', source = 'shared') {
+    email = String(email || '').trim().toLowerCase();
+    if (!validEmail(email) || !ownerId) return;
+    db.run(`INSERT INTO contacts (owner_id, email, name, source, last_used, created_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(owner_id, email) DO UPDATE SET name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE contacts.name END,
+      last_used = COALESCE(excluded.last_used, contacts.last_used)`, ownerId, email, String(name || '').slice(0, 120), source, source === 'imported' ? null : now(), now());
+  }
+  // Someone with pending page invitations now has an account: turn them into shares.
+  function acceptPageInvites(user) {
+    const rows = db.all('SELECT * FROM page_invites WHERE email = ? AND expires_at > ?', String(user.email).toLowerCase(), now());
+    for (const r of rows) {
+      const page = pageById(r.page_id);
+      if (!page || page.deleted_at) continue;
+      db.run(`INSERT INTO page_shares (page_id, user_id, role, created_by, created_at, kind) VALUES (?, ?, ?, ?, ?, 'direct')
+        ON CONFLICT(page_id, user_id) DO UPDATE SET role = excluded.role, kind = 'direct'`, page.id, user.id, r.role, r.invited_by, now());
+      notify([user.id], { kind: 'shared', workspaceId: page.workspace_id, pageId: page.id, actorId: r.invited_by, text: '' });
+      if (r.invited_by) rememberContact(user.id, userById(r.invited_by)?.email, userById(r.invited_by)?.name);
+    }
+    db.run('DELETE FROM page_invites WHERE email = ?', String(user.email).toLowerCase());
+    if (rows.length) sendTo([user.id], { type: 'shared' });
+    return rows.map((r) => r.page_id);
+  }
+  const externalSharing = () => (['anyone', 'admins'].includes(config.externalSharing) ? config.externalSharing : 'anyone');
+
   function notify(userIds, n) {
     const ids = [...new Set(userIds)].filter((id) => id && id !== n.actorId);
     for (const id of ids) {
@@ -344,6 +386,7 @@ export function createApi({ db, config, collab }) {
     db.run('DELETE FROM password_links WHERE user_id = ?', l.user_id);
     const u = userById(l.user_id);
     if (u.disabled_at) fail(403, 'Your account is suspended. Contact your admin.');
+    acceptPageInvites(u);
     return { token: createSession(u), user: userPublic(u) };
   }, { public: true });
 
@@ -357,7 +400,9 @@ export function createApi({ db, config, collab }) {
     if (pw.length < 8) fail(400, 'Use at least 8 characters for your password');
     const first = !db.get('SELECT 1 AS x FROM users LIMIT 1');
     const invite = body.invite ? db.get('SELECT * FROM invites WHERE token = ? AND expires_at > ?', body.invite, now()) : null;
-    if (!first && config.signup !== 'open' && !invite) fail(403, 'Sign-up on this server is by invitation. Ask a teammate for an invite link.');
+    const pageInvite = body.pageInvite ? db.get('SELECT * FROM page_invites WHERE token = ? AND expires_at > ?', hashToken(String(body.pageInvite)), now()) : null;
+    if (pageInvite && pageInvite.email !== email) fail(403, `This invitation is for ${pageInvite.email}. Sign up with that email address.`);
+    if (!first && config.signup !== 'open' && !invite && !pageInvite) fail(403, 'Sign-up on this server is by invitation. Ask a teammate for an invite link.');
     if (db.get('SELECT 1 AS x FROM users WHERE email = ?', email)) fail(409, 'An account with that email already exists. Sign in instead.');
     const user = db.tx(() => {
       const id = newId(9);
@@ -374,7 +419,8 @@ export function createApi({ db, config, collab }) {
       if (invite) acceptInvite(u, invite);
       return u;
     });
-    return { token: createSession(user), user: userPublic(user) };
+    const opened = acceptPageInvites(user);
+    return { token: createSession(user), user: userPublic(user), openPage: pageInvite?.page_id || opened[0] || null };
   }, { public: true });
 
   route('POST', '/api/auth/login', ({ body, req }) => {
@@ -383,12 +429,32 @@ export function createApi({ db, config, collab }) {
     const u = db.get('SELECT * FROM users WHERE email = ?', email);
     if (!u || !checkPassword(String(body.password || ''), u.pw)) fail(401, 'Wrong email or password');
     if (u.disabled_at) fail(403, 'Your account is suspended. Contact your admin.');
+    const pinv = body.pageInvite ? db.get('SELECT page_id FROM page_invites WHERE token = ?', hashToken(String(body.pageInvite))) : null;
+    acceptPageInvites(u);
     if (body.invite) {
       const inv = db.get('SELECT * FROM invites WHERE token = ? AND expires_at > ?', body.invite, now());
       if (inv) acceptInvite(u, inv);
     }
-    return { token: createSession(u), user: userPublic(u) };
+    return { token: createSession(u), user: userPublic(u), openPage: pinv?.page_id || null };
   }, { public: true });
+
+  // What a page invitation is for (shown before signing up or in).
+  route('GET', '/api/page-invites/:token', ({ params }) => {
+    const r = db.get('SELECT * FROM page_invites WHERE token = ? AND expires_at > ?', hashToken(params.token), now());
+    if (!r) fail(404, 'This invitation has expired or was already used. Ask for a new one, or sign in if you already accepted it.');
+    const page = pageById(r.page_id);
+    return { email: r.email, pageTitle: page?.title || 'a page', invitedBy: userById(r.invited_by)?.name || 'Someone', role: r.role, team: config.name, hasAccount: !!db.get('SELECT 1 AS x FROM users WHERE email = ?', r.email) };
+  }, { public: true });
+
+  route('POST', '/api/page-invites/:token/accept', ({ user, params }) => {
+    const r = db.get('SELECT * FROM page_invites WHERE token = ?', hashToken(params.token));
+    if (!r) {
+      fail(404, 'This invitation has expired or was already used.');
+    }
+    if (r.email !== String(user.email).toLowerCase()) fail(403, `This invitation was sent to ${r.email}. Sign out, then sign in or create an account with that email.`);
+    acceptPageInvites(user);
+    return { pageId: r.page_id };
+  });
 
   route('POST', '/api/auth/logout', ({ req }) => {
     const t = (req.headers.authorization || '').slice(7);
@@ -515,6 +581,15 @@ export function createApi({ db, config, collab }) {
     return { page: pagePublic(p), markdown: p.markdown };
   });
   route('GET', '/api/pages/:id', ({ user, params }) => {
+    // "Anyone with the link": opening the page by its link gives access and adds it to Shared with me.
+    const raw = pageById(params.id);
+    if (raw && !raw.deleted_at && !accessFor(user.id, raw)) {
+      const linked = chainOf(raw).find((p) => p.link_role);
+      if (linked) {
+        db.run("INSERT OR IGNORE INTO page_shares (page_id, user_id, role, created_by, created_at, kind) VALUES (?, ?, ?, NULL, ?, 'link')", linked.id, user.id, linked.link_role, now());
+        sendTo([user.id], { type: 'shared' });
+      }
+    }
     const { page, role } = pageFor(user, params.id);
     const ws = db.get('SELECT id, name, kind FROM workspaces WHERE id = ?', page.workspace_id);
     return { page: pagePublic(page), role, workspace: ws, markdown: page.markdown, updatedByName: userById(page.updated_by)?.name || null };
@@ -757,7 +832,7 @@ export function createApi({ db, config, collab }) {
   const nearestShares = (chain) => {
     const map = new Map();
     for (const p of chain) {
-      for (const r of db.all('SELECT user_id, role FROM page_shares WHERE page_id = ?', p.id)) if (!map.has(r.user_id)) map.set(r.user_id, { role: r.role, pageId: p.id, title: p.title });
+      for (const r of db.all('SELECT user_id, role, kind FROM page_shares WHERE page_id = ?', p.id)) if (!map.has(r.user_id)) map.set(r.user_id, { role: r.role, kind: r.kind, pageId: p.id, title: p.title });
     }
     return map;
   };
@@ -773,18 +848,26 @@ export function createApi({ db, config, collab }) {
       const wsRole = roleIn(u.id, page.workspace_id);
       return {
         id: u.id, name: u.name, email: u.email, color: u.color, role: r,
-        via: s ? 'share' : wsRole === 'owner' ? 'owner' : 'member',
+        via: s ? (s.kind === 'link' ? 'link' : 'share') : wsRole === 'owner' ? 'owner' : 'member',
         inheritedFrom: s && s.pageId !== page.id ? s.title : null,
         removable: !!s && s.pageId === page.id,
       };
     }).sort((a, b) => (RANK[b.role] - RANK[a.role]) || a.name.localeCompare(b.name));
+    const pending = db.all('SELECT email, role, created_at AS createdAt FROM page_invites WHERE page_id = ? AND expires_at > ? ORDER BY created_at', page.id, now());
+    const linkFrom = chainOf(page).find((p) => p.link_role);
     return {
       mode: page.access || 'workspace',
       restrictedBy: restrictedBy && restrictedBy.id !== page.id ? { id: restrictedBy.id, title: restrictedBy.title } : null,
       workspace: { id: ws.id, name: ws.name, kind: ws.kind, members: memberIds(ws.id).length },
       canManage: canManage(user.id, page, role),
+      canShare: RANK[role] >= RANK.editor,
       role,
       people,
+      pending,
+      linkRole: page.link_role || null,
+      linkInheritedFrom: linkFrom && linkFrom.id !== page.id ? { id: linkFrom.id, title: linkFrom.title, role: linkFrom.link_role } : null,
+      emailOn: emailOn(),
+      canInviteNew: externalSharing() === 'anyone' || !!user.is_admin,
     };
   });
 
@@ -797,6 +880,18 @@ export function createApi({ db, config, collab }) {
     const { page } = pageFor(user, params.id);
     requireManage(user, page);
     const ws = db.get('SELECT kind FROM workspaces WHERE id = ?', page.workspace_id);
+    if (body.linkRole !== undefined) {
+      const linkRole = ['viewer', 'editor'].includes(body.linkRole) ? body.linkRole : null;
+      db.run('UPDATE pages SET link_role = ? WHERE id = ?', linkRole, page.id);
+      if (linkRole) db.run("UPDATE page_shares SET role = ? WHERE page_id = ? AND kind = 'link'", linkRole, page.id);
+      else db.run("DELETE FROM page_shares WHERE page_id = ? AND kind = 'link'", page.id);
+    }
+    if (body.mode === undefined) {
+      collab.reset(subtree(page));
+      broadcast(page.workspace_id, { type: 'tree', actorId: user.id });
+      sendTo(shareUserIds(page.workspace_id), { type: 'shared' });
+      return { ok: true, linkRole: pageById(page.id).link_role };
+    }
     if (ws.kind === 'private') fail(400, 'Pages in your private space are already private. Share them with people instead.');
     const mode = body.mode === 'restricted' ? 'restricted' : 'workspace';
     db.run('UPDATE pages SET access = ? WHERE id = ?', mode, page.id);
@@ -805,19 +900,129 @@ export function createApi({ db, config, collab }) {
     return { ok: true, mode };
   });
 
-  route('POST', '/api/pages/:id/shares', ({ user, params, body }) => {
-    const { page } = pageFor(user, params.id);
-    requireManage(user, page);
-    const target = userById(String(body.userId || ''));
-    if (!target) fail(404, 'Person not found');
-    if (target.id === user.id) fail(400, 'You already have access');
+  route('POST', '/api/pages/:id/shares', async ({ user, params, body, req }) => {
+    // like Google Docs: anyone who can edit a page can share it
+    const { page } = pageFor(user, params.id, 'editor');
     const role = body.role === 'viewer' ? 'viewer' : 'editor';
-    const existed = db.get('SELECT 1 AS x FROM page_shares WHERE page_id = ? AND user_id = ?', page.id, target.id);
-    db.run('INSERT INTO page_shares (page_id, user_id, role, created_by, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(page_id, user_id) DO UPDATE SET role = excluded.role', page.id, target.id, role, user.id, now());
-    if (!existed) notify([target.id], { kind: 'shared', workspaceId: page.workspace_id, pageId: page.id, actorId: user.id, text: `${user.name} shared “${page.title}” with you` });
-    sendTo([target.id], { type: 'shared' });
+    const notifyThem = body.notify !== false;
+    const message = String(body.message || '').trim().slice(0, 2000);
+    const base = baseUrlFor(req, body);
+    const pageUrl = `${base}/#/p/${page.id}`;
+    const ROLE_WORD = { editor: 'edit', viewer: 'view' };
+    // accept one userId, or a list of people: [{ userId } | { email, name }]
+    const targets = Array.isArray(body.people) ? body.people : [{ userId: body.userId, email: body.email, name: body.name }];
+    const results = [];
+    for (const t of targets.slice(0, 50)) {
+      let target = t.userId ? userById(String(t.userId)) : null;
+      const email = String(t.email || target?.email || '').trim().toLowerCase();
+      if (!target && email) target = db.get('SELECT * FROM users WHERE email = ?', email) || null;
+      if (target) {
+        if (target.id === user.id) { results.push({ email: target.email, error: 'You already have access' }); continue; }
+        const existed = db.get("SELECT 1 AS x FROM page_shares WHERE page_id = ? AND user_id = ? AND kind = 'direct'", page.id, target.id);
+        db.run(`INSERT INTO page_shares (page_id, user_id, role, created_by, created_at, kind) VALUES (?, ?, ?, ?, ?, 'direct')
+          ON CONFLICT(page_id, user_id) DO UPDATE SET role = excluded.role, kind = 'direct', created_by = excluded.created_by`, page.id, target.id, role, user.id, now());
+        rememberContact(user.id, target.email, target.name);
+        const r = { email: target.email, name: target.name, userId: target.id, shared: true };
+        if (!existed) {
+          notify([target.id], { kind: 'shared', workspaceId: page.workspace_id, pageId: page.id, actorId: user.id, text: message || `${user.name} shared “${page.title}” with you` });
+          if (notifyThem) Object.assign(r, await mail(target.email, `${user.name} shared “${page.title}” with you`, {
+            heading: `${user.name} shared a page with you`,
+            lines: [`You can ${ROLE_WORD[role]} “${page.title}” in ${config.name} on Local Notes.`],
+            quote: message, button: { label: `Open “${page.title}”`, url: pageUrl },
+          }, user.email));
+        }
+        sendTo([target.id], { type: 'shared' });
+        results.push(r);
+        continue;
+      }
+      // not on this server yet: an invitation tied to their email address
+      if (!validEmail(email)) { results.push({ email, error: 'Not a valid email address' }); continue; }
+      if (externalSharing() !== 'anyone' && !user.is_admin) { results.push({ email, error: 'Only admins can invite people who aren’t on this server yet' }); continue; }
+      const token = newToken();
+      db.run('DELETE FROM page_invites WHERE page_id = ? AND email = ?', page.id, email);
+      db.run('INSERT INTO page_invites (token, page_id, email, role, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        hashToken(token), page.id, email, role, user.id, now(), now() + 30 * 86400e3);
+      rememberContact(user.id, email, t.name || '');
+      const link = `${base}/#/join/${token}`;
+      const r = { email, invited: true, link };
+      if (notifyThem) Object.assign(r, await mail(email, `${user.name} invited you to “${page.title}”`, {
+        heading: `${user.name} invited you to a page`,
+        lines: [`You can ${ROLE_WORD[role]} “${page.title}” in ${config.name} on Local Notes. Open the link to create your account; it takes a minute.`],
+        quote: message, button: { label: 'Accept invitation', url: link },
+        footer: 'This invitation works for 30 days.',
+      }, user.email));
+      results.push(r);
+    }
     collab.reset(subtree(page));
     broadcast(page.workspace_id, { type: 'tree', actorId: user.id });
+    return { ok: true, results, emailOn: emailOn() };
+  });
+
+  // pending invitations (people without an account yet)
+  route('PATCH', '/api/pages/:id/invites', ({ user, params, body }) => {
+    const { page } = pageFor(user, params.id);
+    requireManage(user, page);
+    db.run('UPDATE page_invites SET role = ? WHERE page_id = ? AND email = ?', body.role === 'viewer' ? 'viewer' : 'editor', page.id, String(body.email || '').toLowerCase());
+    return { ok: true };
+  });
+  route('DELETE', '/api/pages/:id/invites', ({ user, params, query }) => {
+    const { page } = pageFor(user, params.id);
+    requireManage(user, page);
+    db.run('DELETE FROM page_invites WHERE page_id = ? AND email = ?', page.id, String(query.email || '').toLowerCase());
+    return { ok: true };
+  });
+  // a fresh link for a pending invitation (to copy and send yourself)
+  route('POST', '/api/pages/:id/invites/link', ({ user, params, body, req }) => {
+    const { page } = pageFor(user, params.id);
+    requireManage(user, page);
+    const email = String(body.email || '').toLowerCase();
+    const row = db.get('SELECT * FROM page_invites WHERE page_id = ? AND email = ?', page.id, email);
+    if (!row) fail(404, 'Invitation not found');
+    const token = newToken();
+    db.run('UPDATE page_invites SET token = ?, expires_at = ? WHERE token = ?', hashToken(token), now() + 30 * 86400e3, row.token);
+    return { link: `${baseUrlFor(req, body)}/#/join/${token}` };
+  });
+
+  // ---------------------------------------------------------------- address book
+  // Suggestions as you type: people on this server plus your own contacts (people you've
+  // shared with, and contacts you imported from Gmail/Outlook), most recently used first.
+  route('GET', '/api/contacts', ({ user, query }) => {
+    const q = String(query.q || '').trim().toLowerCase();
+    const like = `%${q}%`;
+    const word = (s) => !q || String(s || '').toLowerCase().split(/[\s.@_-]+/).some((w) => w.startsWith(q)) || String(s || '').toLowerCase().startsWith(q);
+    const mine = db.all(`SELECT email, name, source, last_used AS lastUsed FROM contacts WHERE owner_id = ? ${q ? 'AND (lower(name) LIKE ? OR email LIKE ?)' : 'AND last_used IS NOT NULL'} ORDER BY last_used DESC NULLS LAST, name LIMIT 200`, user.id, ...(q ? [like, like] : []));
+    const users = q ? db.all('SELECT id, name, email, color FROM users WHERE disabled_at IS NULL AND (lower(name) LIKE ? OR email LIKE ?) LIMIT 100', like, like) : [];
+    const byEmail = new Map();
+    for (const u of users) byEmail.set(u.email, { id: u.id, name: u.name, email: u.email, color: u.color, onServer: true, lastUsed: null });
+    for (const c of mine) {
+      const u = byEmail.get(c.email) || db.get('SELECT id, name, email, color FROM users WHERE email = ? AND disabled_at IS NULL', c.email);
+      byEmail.set(c.email, { id: u?.id || null, name: u?.name || c.name || '', email: c.email, color: u?.color || null, onServer: !!u, lastUsed: c.lastUsed });
+    }
+    const list = [...byEmail.values()].filter((p) => p.email !== user.email && (word(p.name) || word(p.email) || (q.includes('@') && p.email.includes(q))));
+    list.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0) || Number(b.onServer) - Number(a.onServer) || (a.name || a.email).localeCompare(b.name || b.email));
+    return { people: list.slice(0, q ? 8 : 6) };
+  });
+  route('GET', '/api/contacts/all', ({ user }) => ({
+    contacts: db.all('SELECT email, name, source, last_used AS lastUsed FROM contacts WHERE owner_id = ? ORDER BY lower(CASE WHEN name <> \'\' THEN name ELSE email END)', user.id)
+      .map((c) => ({ ...c, onServer: !!db.get('SELECT 1 AS x FROM users WHERE email = ?', c.email) })),
+  }));
+  route('POST', '/api/contacts/import', ({ user, body }) => {
+    const list = Array.isArray(body.contacts) ? body.contacts.slice(0, 10000) : [];
+    let added = 0;
+    db.tx(() => {
+      for (const c of list) {
+        const email = String(c?.email || '').trim().toLowerCase();
+        if (!validEmail(email) || email === user.email) continue;
+        const had = db.get('SELECT 1 AS x FROM contacts WHERE owner_id = ? AND email = ?', user.id, email);
+        rememberContact(user.id, email, c.name || '', 'imported');
+        if (!had) added++;
+      }
+    });
+    return { added, total: db.get('SELECT COUNT(*) AS n FROM contacts WHERE owner_id = ?', user.id).n };
+  });
+  route('DELETE', '/api/contacts', ({ user, query }) => {
+    if (query.all === '1') db.run('DELETE FROM contacts WHERE owner_id = ?', user.id);
+    else db.run('DELETE FROM contacts WHERE owner_id = ? AND email = ?', user.id, String(query.email || '').toLowerCase());
     return { ok: true };
   });
 
@@ -902,7 +1107,8 @@ export function createApi({ db, config, collab }) {
   route('GET', '/api/admin/overview', ({ user }) => {
     requireServerAdmin(user);
     return {
-      settings: { name: config.name, signup: config.signup },
+      settings: { name: config.name, signup: config.signup, externalSharing: externalSharing() },
+      emailOn: emailOn(),
       version: config.version,
       dataDir: config.dataDir,
       addresses: lanAddresses(),
@@ -926,12 +1132,38 @@ export function createApi({ db, config, collab }) {
       patch.name = name;
     }
     if (body.signup !== undefined) patch.signup = body.signup === 'open' ? 'open' : 'invite';
+    if (body.externalSharing !== undefined) patch.externalSharing = body.externalSharing === 'admins' ? 'admins' : 'anyone';
     saveServerSettings(patch);
-    return { settings: { name: config.name, signup: config.signup } };
+    return { settings: { name: config.name, signup: config.signup, externalSharing: externalSharing() } };
+  });
+
+  // outgoing email (SMTP) for invitations and share notifications
+  const publicEmail = (s) => ({ host: s.host || '', port: s.port || '', secure: !!s.secure, user: s.user || '', from: s.from || '', hasPassword: !!s.pass, configured: emailConfigured(s) });
+  route('GET', '/api/admin/email', ({ user }) => { requireServerAdmin(user); return publicEmail(emailSettings()); });
+  route('PUT', '/api/admin/email', ({ user, body }) => {
+    requireServerAdmin(user);
+    const cur = emailSettings();
+    const next = {
+      host: String(body.host || '').trim(), port: Number(body.port) || '', secure: !!body.secure,
+      user: String(body.user || '').trim(), from: String(body.from || '').trim(),
+      pass: body.pass === undefined || body.pass === '' ? cur.pass || '' : String(body.pass),
+    };
+    if (body.clear) Object.assign(next, { host: '', port: '', user: '', from: '', pass: '', secure: false });
+    if (next.host && !next.from) fail(400, 'Enter the “From” address emails are sent from');
+    db.run("INSERT INTO settings (key, value) VALUES ('email', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", JSON.stringify(next));
+    return publicEmail(next);
+  });
+  route('POST', '/api/admin/email/test', async ({ user, body }) => {
+    requireServerAdmin(user);
+    const to = String(body.to || user.email).trim();
+    try {
+      await sendEmail(emailSettings(), { to, subject: 'Local Notes: test email', heading: 'Email is working', lines: [`This test came from ${config.name} on Local Notes. Invitations and share notifications will be sent from this address.`] });
+    } catch (e) { fail(400, `Couldn’t send: ${e.message}`); }
+    return { ok: true, to };
   });
 
   // Add a person directly: creates the account and returns a link for them to choose a password.
-  route('POST', '/api/admin/users', ({ user, body }) => {
+  route('POST', '/api/admin/users', async ({ user, body, req }) => {
     requireServerAdmin(user);
     const email = String(body.email || '').trim().toLowerCase();
     const name = String(body.name || '').trim().slice(0, 80);
@@ -950,8 +1182,18 @@ export function createApi({ db, config, collab }) {
       for (const ws of wsIds) db.run('INSERT OR IGNORE INTO members (workspace_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)', ws, id, role, now());
       return { u: nu, token: passwordLink(id, 'welcome', user.id, 14) };
     });
+    acceptPageInvites(u);
     for (const ws of wsIds) broadcast(ws, { type: 'members' });
-    return { user: adminUser(u), token };
+    let emailed = {};
+    if (body.sendEmail !== false && body.baseUrl !== undefined) {
+      emailed = await mail(u.email, `You’ve been added to ${config.name} on Local Notes`, {
+        heading: `Welcome to ${config.name}`,
+        lines: [`${user.name} added you to ${config.name} on Local Notes. Choose a password to get started.`],
+        button: { label: 'Choose your password', url: `${baseUrlFor(req, body)}/#/password/${token}` },
+        footer: 'This link works once, for 14 days.',
+      }, user.email);
+    }
+    return { user: adminUser(u), token, ...emailed };
   });
 
   route('PATCH', '/api/admin/users/:id', ({ user, params, body }) => {
@@ -975,12 +1217,20 @@ export function createApi({ db, config, collab }) {
     return { user: adminUser(userById(target.id)) };
   });
 
-  route('POST', '/api/admin/users/:id/password-link', ({ user, params }) => {
+  route('POST', '/api/admin/users/:id/password-link', async ({ user, params, body, req }) => {
     requireServerAdmin(user);
     const target = userById(params.id);
     if (!target) fail(404, 'Person not found');
     const pending = db.get("SELECT 1 AS x FROM password_links WHERE user_id = ? AND kind = 'welcome' AND expires_at > ?", target.id, now());
-    return { token: passwordLink(target.id, pending ? 'welcome' : 'reset', user.id, pending ? 14 : 2) };
+    const token = passwordLink(target.id, pending ? 'welcome' : 'reset', user.id, pending ? 14 : 2);
+    let emailed = {};
+    if (body.sendEmail) {
+      const url = `${baseUrlFor(req, body)}/#/password/${token}`;
+      emailed = await mail(target.email, pending ? `Your invitation to ${config.name}` : `Reset your ${config.name} password`, pending
+        ? { heading: `Welcome to ${config.name}`, lines: [`${user.name} added you to ${config.name} on Local Notes. Choose a password to get started.`], button: { label: 'Choose your password', url }, footer: 'This link works once, for 14 days.' }
+        : { heading: 'Choose a new password', lines: [`${user.name} sent you a link to reset your ${config.name} password.`], button: { label: 'Choose a new password', url }, footer: 'This link works once, for 2 days. If you didn’t ask for it, you can ignore this email.' }, user.email);
+    }
+    return { token, ...emailed };
   });
 
   // Join a workspace as owner (e.g. one whose owners have left).

@@ -121,7 +121,7 @@ function setupUpdater() {
   autoUpdater.on('error', () => { /* offline or no release yet: stay quiet */ });
   autoUpdater.checkForUpdates().catch(() => {});
   setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 6 * 60 * 60 * 1000);
-  ipcMain.on('install-update', () => autoUpdater.quitAndInstall());
+  ipcMain.on('install-update', async () => { await flushPage(); if (stateTimer) writeState(); autoUpdater.quitAndInstall(); });
 }
 
 ipcMain.handle('pick-folder', async (_e, opts = {}) => {
@@ -132,6 +132,98 @@ ipcMain.handle('pick-folder', async (_e, opts = {}) => {
   });
   return r.canceled ? null : r.filePaths[0];
 });
+// ---------------------------------------------------------------- UI settings file
+const stateFile = () => path.join(app.getPath('userData'), 'ui-state.json');
+let stateCache = null;
+let stateTimer = null;
+function writeState() {
+  clearTimeout(stateTimer);
+  stateTimer = null;
+  try {
+    const tmp = stateFile() + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(stateCache || {}));
+    fs.renameSync(tmp, stateFile());
+  } catch { /* read-only profile */ }
+}
+ipcMain.on('state:load', (e) => {
+  if (!stateCache) { try { stateCache = JSON.parse(fs.readFileSync(stateFile(), 'utf8')); } catch { stateCache = {}; } }
+  e.returnValue = stateCache;
+});
+ipcMain.on('state:save', (_e, data) => {
+  if (!data || typeof data !== 'object') return;
+  stateCache = data;
+  if (!stateTimer) stateTimer = setTimeout(writeState, 400);
+});
+
+// Ask the page to save unsaved work, then continue (at most a few seconds).
+function flushPage() {
+  if (!win || win.isDestroyed()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, 4000);
+    ipcMain.once('flush-done', () => { clearTimeout(t); resolve(); });
+    win.webContents.send('flush-request');
+  });
+}
+
+// ---------------------------------------------------------------- export & print
+const FILTERS = {
+  pdf: ['PDF document', ['pdf']], docx: ['Word document', ['docx']], html: ['Web page', ['html', 'htm']],
+  md: ['Markdown', ['md']], txt: ['Plain text', ['txt']],
+};
+async function askSavePath(name, ext) {
+  const [label, exts] = FILTERS[ext] || ['File', [ext]];
+  const r = await dialog.showSaveDialog(win, {
+    title: 'Export',
+    defaultPath: path.join(app.getPath('documents'), name),
+    filters: [{ name: label, extensions: exts }],
+  });
+  return r.canceled ? null : r.filePath;
+}
+// Pick files to open/import (any local, network or synced cloud drive).
+ipcMain.handle('open-files', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Open or import files',
+    buttonLabel: 'Open',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Documents', extensions: ['md', 'markdown', 'txt', 'docx', 'pdf', 'html', 'htm', 'xlsx', 'csv', 'tsv', 'pptx', 'odt', 'rtf', 'json'] },
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (r.canceled) return [];
+  return r.filePaths.filter((p) => fs.statSync(p).size <= 100 * 1024 * 1024).map((p) => ({ name: path.basename(p), path: p, data: fs.readFileSync(p) }));
+});
+ipcMain.handle('save-file', async (_e, { name, ext, data } = {}) => {
+  const target = await askSavePath(String(name || 'Untitled'), String(ext || 'txt'));
+  if (!target) return null;
+  fs.writeFileSync(target, Buffer.from(data));
+  return target;
+});
+// Render exported HTML in a hidden window with scripts off.
+async function withHtmlWindow(html, fn) {
+  const tmp = path.join(app.getPath('temp'), `local-notes-export-${Date.now()}.html`);
+  fs.writeFileSync(tmp, html);
+  const w = new BrowserWindow({ show: false, webPreferences: { javascript: false, sandbox: true, contextIsolation: true } });
+  try {
+    await w.loadFile(tmp);
+    return await fn(w);
+  } finally {
+    if (!w.isDestroyed()) w.destroy();
+    fs.rmSync(tmp, { force: true });
+  }
+}
+ipcMain.handle('export-pdf', async (_e, { html, name } = {}) => {
+  const pdf = await withHtmlWindow(String(html || ''), (w) => w.webContents.printToPDF({ printBackground: true, pageSize: 'A4', margins: { marginType: 'default' } }));
+  const target = await askSavePath(String(name || 'Untitled.pdf'), 'pdf');
+  if (!target) return null;
+  fs.writeFileSync(target, pdf);
+  return target;
+});
+ipcMain.handle('print-html', (_e, html) => withHtmlWindow(String(html || ''), (w) => new Promise((resolve) => {
+  w.webContents.print({ printBackground: true }, (ok) => resolve(ok));
+})));
+
 ipcMain.handle('app-info', () => ({ version: app.getVersion(), platform: process.platform }));
 ipcMain.on('set-theme', (_e, { dark }) => {
   if (win && !IS_MAC) { try { win.setTitleBarOverlay(overlayColors(dark)); } catch { /* unsupported */ } }
@@ -148,8 +240,18 @@ ipcMain.on('host:open-data', () => { const d = host.status().dataDir; fs.mkdirSy
 
 app.whenReady().then(async () => {
   const { server } = createVaultServer({ configDir: app.getPath('userData'), publicDir: path.join(ROOT, 'public') });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  // Keep the same local port between launches so the page's origin (and anything the
+  // browser engine stores for it) stays the same; fall back to any free port.
+  const portFile = path.join(app.getPath('userData'), 'port.json');
+  let preferred = 0;
+  try { preferred = Number(JSON.parse(fs.readFileSync(portFile, 'utf8')).port) || 0; } catch { /* first run */ }
+  const listen = (p) => new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(p, '127.0.0.1', () => { server.off('error', reject); resolve(); });
+  });
+  try { await listen(preferred || 47321); } catch { await listen(0); }
   port = server.address().port;
+  try { fs.writeFileSync(portFile, JSON.stringify({ port })); } catch { /* read-only profile */ }
   buildMenu();
   host.init({ notify: (s) => { if (win && !win.isDestroyed()) win.webContents.send('host-changed', s); }, show: showWindow });
   // started with the computer to host the team server: stay in the tray until opened
@@ -157,5 +259,7 @@ app.whenReady().then(async () => {
   setupUpdater();
   app.on('activate', () => showWindow());
 });
+
+app.on('will-quit', () => { if (stateTimer) writeState(); });
 
 app.on('window-all-closed', () => { if (!IS_MAC && !host.isHosting()) app.quit(); });

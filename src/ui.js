@@ -137,14 +137,34 @@ export function toast(message, { kind = 'info', timeout = 2600, action = null } 
   if (action) t.querySelector('.toast-btn').onclick = () => { action.run(); t.remove(); };
   wrap.append(t);
   if (timeout) setTimeout(() => { t.classList.add('leaving'); setTimeout(() => t.remove(), 200); }, timeout);
+  return t;
 }
 
 // ------------------------------------------------------------------ prefs
+// Small settings store. In the desktop app it's backed by a file in the profile folder, so
+// settings survive restarts and updates; in a browser it uses localStorage.
+const disk = typeof window !== 'undefined' ? window.desktop?.state : null;
+let diskCache = null;
+if (disk) {
+  diskCache = disk.load() || {};
+  if (!Object.keys(diskCache).length) {
+    // first run with file-backed settings: carry over anything already in this origin's storage
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k?.startsWith('ln:')) diskCache[k] = JSON.parse(localStorage.getItem(k));
+      }
+      if (Object.keys(diskCache).length) disk.save(diskCache);
+    } catch { /* storage unavailable */ }
+  }
+}
 export const store = {
   get(key, fallback) {
+    if (diskCache) return key in diskCache ? diskCache[key] : fallback;
     try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); } catch { return fallback; }
   },
   set(key, value) {
+    if (diskCache) { diskCache[key] = value; disk.save(diskCache); return; }
     try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
   },
 };

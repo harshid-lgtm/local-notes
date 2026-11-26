@@ -9,9 +9,12 @@ import { createEditor, loadMarkdown, getMarkdown, host, sniffStyle } from './edi
 import { Selection } from '@tiptap/pm/state';
 import { formatButtons, runFormat, syncFormat } from './format.js';
 import { mountGraph, folderColor, setFolders } from './graph.js';
-import { showTeamSignIn, startTeam } from './team/team.js';
+import { showTeamSignIn, startTeam, flushTeam } from './team/team.js';
 import { savedTeams } from './team/client.js';
 import { canHost, openHostDialog } from './team/host.js';
+import { openFindBar, closeFindBar } from './find.js';
+import { exportMenuItems, printPage } from './export.js';
+import { convertFile, linkImages, blobToBase64, IMPORT_ACCEPT, extOf } from './importer.js';
 import { openAIMenu, openWritePanel, summarizePage, toggleAskPanel, openAISettings, setAIHooks, closeAskPanel } from './ai/ai.js';
 
 // ================================================================== state
@@ -29,9 +32,11 @@ const S = {
 };
 
 const prefs = {
-  theme: 'system', font: 'sans', small: false, wide: false, sidebar: 264, collapsed: false,
+  theme: 'system', font: 'sans', textSize: 'default', wide: false, sidebar: 264, collapsed: false,
   ...store.get('ln:prefs', {}),
 };
+if (prefs.small && prefs.textSize === 'default') prefs.textSize = 'small'; // older "Small text" switch
+delete prefs.small;
 const savePrefs = () => store.set('ln:prefs', prefs);
 const vaultKey = (k) => `ln:${S.vault.path}:${k}`;
 const persistVault = () => {
@@ -51,7 +56,7 @@ function applyPrefs() {
     ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : prefs.theme;
   root.dataset.font = prefs.font;
-  root.classList.toggle('small-text', prefs.small);
+  root.dataset.textsize = prefs.textSize || 'default';
   root.classList.toggle('full-width', prefs.wide);
   root.style.setProperty('--sidebar-w', `${prefs.sidebar}px`);
   document.body.classList.toggle('sidebar-collapsed', prefs.collapsed);
@@ -687,6 +692,7 @@ function wireSidebar() {
   $('#vault-switch').onclick = (e) => vaultMenu(e.currentTarget);
   $('#btn-search').onclick = () => openPalette();
   $('#btn-new').onclick = () => newNote('');
+  $('#btn-import').onclick = (e) => importMenu(e.currentTarget);
   $('#btn-home').onclick = () => showHome();
   $('#btn-add-root').onclick = (e) => showMenu([
     { label: 'New page', icon: 'file-plus', run: () => newNote('') },
@@ -707,6 +713,118 @@ function setCollapsed(v) {
   savePrefs();
 }
 
+// ================================================================== import & open files
+function importMenu(anchor) {
+  showMenu([
+    { header: 'Import into this vault' },
+    { label: 'Files from this computer or a drive…', icon: 'file-up', hint: `${modKey}+O`, run: () => pickFilesToImport() },
+    { label: 'From a web address…', icon: 'globe', run: () => importFromUrl() },
+    { footer: 'Word, PDF, Excel, PowerPoint, web pages, CSV, OpenDocument, RTF, Markdown, text and images. You can also drag files onto the window.' },
+  ], anchor, { className: 'wide' });
+}
+
+async function pickFilesToImport() {
+  if (!S.vault) return;
+  if (window.desktop?.openFiles) {
+    const files = await window.desktop.openFiles();
+    if (!files?.length) return;
+    const inVault = files.filter((f) => /\.md$/i.test(f.name) && insideVault(f.path));
+    if (inVault.length === 1 && files.length === 1) return openNote(insideVault(inVault[0].path));
+    return importFiles(files.map((f) => new File([f.data], f.name)));
+  }
+  const input = h(`<input type="file" multiple accept="${IMPORT_ACCEPT}" hidden>`);
+  document.body.append(input);
+  input.onchange = () => { importFiles([...input.files]); input.remove(); };
+  input.click();
+}
+
+// A path inside the open vault -> its vault-relative path, else null.
+function insideVault(full) {
+  const root = String(S.vault?.path || S.vault?.display || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const p = String(full || '').replace(/\\/g, '/');
+  return root && p.toLowerCase().startsWith(root + '/') ? p.slice(root.length + 1) : null;
+}
+
+async function importFiles(files, { baseUrl = null } = {}) {
+  if (!files.length || !S.vault) return;
+  const folder = S.current ? dirName(S.current.path) : '';
+  const t = toast(files.length === 1 ? `Importing ${files[0].name}…` : `Importing ${files.length} files…`, { timeout: 0 });
+  let last = null;
+  const failed = [];
+  for (const file of files) {
+    try {
+      const r = await convertFile(file, { baseUrl });
+      const links = new Map();
+      for (const im of r.images) links.set(im.id, (await api.attach(im.name, await blobToBase64(im.blob), folder)).link);
+      const md = linkImages(r.markdown, r.images, (im) => encodeURI(links.get(im.id)));
+      last = (await api.create(folder, r.title, md)).path;
+    } catch (e) {
+      console.error(e);
+      failed.push(`${file.name}: ${e.message}`);
+    }
+  }
+  t?.remove();
+  await refreshTree();
+  if (last) {
+    await openNote(last);
+    const ok = files.length - failed.length;
+    toast(ok === 1 ? 'Imported 1 page' : `Imported ${ok} pages`, { kind: 'success' });
+  }
+  if (failed.length) toast(failed.join('\n'), { kind: 'error', timeout: 10000 });
+}
+
+async function importFromUrl() {
+  const box = h(`<div class="cv">
+    <div class="cv-art ws-art">${icon('globe', 30, 1.5)}</div>
+    <h3>Import from a web address</h3>
+    <p>A web page, or a link to a Word, PDF, Excel or other file on a website or server.</p>
+    <label class="field"><span>Address</span><input name="url" placeholder="https://…" spellcheck="false" autocomplete="url"></label>
+    <div class="confirm-actions"><button class="btn ghost" data-no>Cancel</button><button class="btn primary" data-yes>Import</button></div></div>`);
+  const m = openModal(box, { className: 'small' });
+  const input = $('input', box);
+  setTimeout(() => input.focus(), 30);
+  const go = async () => {
+    const btn = $('[data-yes]', box);
+    btn.disabled = true;
+    btn.textContent = 'Downloading…';
+    try {
+      const r = await api.fetchUrl(input.value);
+      const bytes = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
+      let name = r.name || 'page';
+      if (/text\/html/i.test(r.contentType) && !/\.html?$/i.test(name)) name = `${name.replace(/\.[a-z0-9]+$/i, '') || 'page'}.html`;
+      else if (!extOf(name)) {
+        const ext = { 'application/pdf': 'pdf', 'text/csv': 'csv', 'text/plain': 'txt', 'text/markdown': 'md' }[r.contentType.split(';')[0].trim()];
+        if (ext) name += `.${ext}`;
+      }
+      m.close();
+      await importFiles([new File([bytes], name, { type: r.contentType })], { baseUrl: r.url });
+    } catch (e) {
+      toast(e.message, { kind: 'error' });
+      btn.disabled = false;
+      btn.textContent = 'Import';
+    }
+  };
+  $('[data-no]', box).onclick = () => m.close();
+  $('[data-yes]', box).onclick = go;
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+}
+
+function wireFileDrop() {
+  let depth = 0;
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const shade = () => $('#drop-shade') || document.body.appendChild(h(`<div id="drop-shade"><div>${icon('file-up', 34, 1.5)}<strong>Drop to import</strong><span>Word, PDF, Excel, PowerPoint, web pages, text and images</span></div></div>`));
+  document.addEventListener('dragenter', (e) => { if (!S.vault || !hasFiles(e)) return; depth++; shade().classList.add('on'); });
+  document.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) $('#drop-shade')?.classList.remove('on'); });
+  document.addEventListener('dragover', (e) => { if (S.vault && hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('drop', (e) => {
+    if (!S.vault || !hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    $('#drop-shade')?.classList.remove('on');
+    importFiles([...e.dataTransfer.files]);
+  }, true);
+}
+
 function vaultMenu(anchor) {
   const others = S.boot.recent.filter((r) => r.path !== S.vault.path).slice(0, 4);
   showMenu([
@@ -714,6 +832,8 @@ function vaultMenu(anchor) {
     'sep',
     ...(others.length ? [{ header: 'Switch vault' }, ...others.map((o) => ({ label: o.name, icon: 'book', run: () => switchVault(o.path) }))] : []),
     { label: 'Open another folder…', icon: 'folder-open', run: () => openFolderPicker() },
+    { label: 'Import files…', icon: 'file-up', run: () => pickFilesToImport() },
+    { label: 'Import from a web address…', icon: 'globe', run: () => importFromUrl() },
     { label: 'Create a new vault…', icon: 'plus', run: () => createVaultDialog() },
     'sep',
     { header: 'Team servers' },
@@ -843,6 +963,7 @@ function updatePageChrome() {
 }
 
 async function openNote(path, { fresh = false, replace = false } = {}) {
+  closeFindBar();
   await flushSave();
   let data;
   try {
@@ -980,6 +1101,29 @@ function wireTitle() {
   });
 }
 
+// Page text size: Small / Default / Large / Extra large (for reading comfort).
+export const TEXT_SIZES = [['small', 'Small', 13], ['default', 'Default', 15], ['large', 'Large', 17.5], ['xl', 'X-Large', 20]];
+function sizePicker() {
+  const el = h(`<div class="size-picker"><span class="size-label">Text size</span><div class="size-opts">${TEXT_SIZES.map(([k, label, px]) => `
+    <button class="size-opt ${prefs.textSize === k ? 'on' : ''}" data-size="${k}" title="${label}"><span style="font-size:${px}px">A</span></button>`).join('')}</div></div>`);
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const b = e.target.closest('[data-size]');
+    if (!b) return;
+    prefs.textSize = b.dataset.size;
+    applyPrefs();
+    savePrefs();
+    el.querySelectorAll('.size-opt').forEach((x) => x.classList.toggle('on', x === b));
+  });
+  return el;
+}
+
+function exportMenu(anchor) {
+  if (!S.current) return;
+  const opts = () => ({ editor, title: stripMd(baseName(S.current.path)), markdown: composeFile() });
+  showMenu([{ header: 'Export as' }, ...exportMenuItems(opts)], anchor, { align: 'end' });
+}
+
 function pageMenu(anchor) {
   if (!S.current) return;
   updateCounts();
@@ -1010,7 +1154,12 @@ function pageMenu(anchor) {
   showMenu([
     { header: 'Style' },
     { custom: fonts },
-    toggle('small', 'Small text', 'text'),
+    { custom: sizePicker() },
+    'sep',
+    { label: 'Find in page', icon: 'search', hint: `${modKey}+F`, run: () => openFindBar(editor) },
+    { label: 'Find and replace', icon: 'replace', hint: `${modKey}+H`, run: () => openFindBar(editor, { replace: true }) },
+    { label: 'Export…', icon: 'file-down', run: () => exportMenu(anchor) },
+    { label: 'Print…', icon: 'printer', run: () => printPage({ editor, title: stripMd(baseName(S.current.path)) }) },
     toggle('wide', 'Full width', 'arrow-up-right'),
     'sep',
     { label: 'Summarize with AI', icon: 'sparkles', run: () => summarizePage(editor, 'summary') },
@@ -1389,6 +1538,10 @@ function openPalette(initial = '') {
     ['Summarize this page with AI', 'sparkles', () => S.current && summarizePage(editor, 'summary')],
     ['AI settings', 'sparkles', () => openAISettings()],
     ['New folder', 'folder-plus', () => newFolder('')],
+    ['Import files…', 'file-up', () => pickFilesToImport()],
+    ['Import from a web address…', 'globe', () => importFromUrl()],
+    ['Export this page…', 'file-down', () => S.current && exportMenu({ x: innerWidth - 260, y: 60 })],
+    ['Find in page', 'search', () => S.current && openFindBar(editor)],
     ['Go home', 'home', () => showHome()],
     ['Switch to dark theme', 'moon', () => { prefs.theme = 'dark'; applyPrefs(); savePrefs(); }],
     ['Switch to light theme', 'sun', () => { prefs.theme = 'light'; applyPrefs(); savePrefs(); }],
@@ -1529,6 +1682,7 @@ function buildShell() {
         <button class="nav-item" id="btn-today">${icon('calendar', 17)}<span>Today</span></button>
         <button class="nav-item" id="btn-graph">${icon('graph', 17)}<span>Graph view</span><kbd>${modKey} G</kbd></button>
         <button class="nav-item" id="btn-new">${icon('file-plus', 17)}<span>New page</span><kbd>${modKey} Alt N</kbd></button>
+        <button class="nav-item" id="btn-import">${icon('file-up', 17)}<span>Import</span><kbd>${modKey} O</kbd></button>
       </nav>
       <div class="sb-scroll">
         <section id="fav-section" hidden>
@@ -1634,6 +1788,7 @@ function buildShell() {
   });
   wireSidebar();
   wireTitle();
+  wireFileDrop();
 }
 
 function wireGlobalKeys() {
@@ -1645,8 +1800,11 @@ function wireGlobalKeys() {
       if (k === 'k' && editor.isFocused && !editor.state.selection.empty) { e.preventDefault(); $('.bubble [data-cmd="link"]')?.click(); return; }
       e.preventDefault();
       if (!$('.palette')) openPalette();
-    } else if (mod && e.altKey && k === 'n') { e.preventDefault(); newNote(S.current ? dirName(S.current.path) : ''); }
+    } else if (mod && e.shiftKey && k === 'f') { e.preventDefault(); if (!$('.palette')) openPalette(); }
+    else if (mod && (k === 'f' || k === 'h') && !e.shiftKey && !e.altKey && S.current) { e.preventDefault(); openFindBar(editor, { replace: k === 'h' }); }
+    else if (mod && e.altKey && k === 'n') { e.preventDefault(); newNote(S.current ? dirName(S.current.path) : ''); }
     else if (mod && k === 's') { e.preventDefault(); flushSave(); }
+    else if (mod && k === 'o' && !e.shiftKey) { e.preventDefault(); pickFilesToImport(); }
     else if (mod && k === 'g' && !e.shiftKey) { e.preventDefault(); showGraph(); }
     else if (mod && k === 'j') {
       e.preventDefault();
@@ -1704,7 +1862,18 @@ async function startHosted() {
   const invite = location.hash.match(/^#\/invite\/([\w-]+)/)?.[1] || null;
   const passwordToken = location.hash.match(/^#\/password\/([\w-]+)/)?.[1] || null;
   if (passwordToken) return showTeamSignIn({ hosted: true, passwordToken });
+  const joinToken = location.hash.match(/^#\/join\/([\w-]+)/)?.[1] || null;
   const saved = savedTeams().find((c) => c.url === location.origin);
+  if (joinToken) {
+    // a page invitation: accept it straight away if you're already signed in as that person
+    if (saved?.token) {
+      const r = await fetch(`/api/page-invites/${joinToken}/accept`, { method: 'POST', headers: { Authorization: `Bearer ${saved.token}`, 'Content-Type': 'application/json' }, body: '{}' });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.pageId) { history.replaceState(null, '', `#/p/${j.pageId}`); return startTeam(saved, { hosted: true }); }
+      if (r.status !== 401) { history.replaceState(null, '', '#'); toast(j.error || 'This invitation can’t be used', { kind: 'error', timeout: 9000 }); return startTeam(saved, { hosted: true }); }
+    }
+    return showTeamSignIn({ hosted: true, joinToken });
+  }
   if (saved?.token) {
     if (invite) {
       try {
@@ -1723,6 +1892,7 @@ async function startHosted() {
 async function boot() {
   if (window.desktop) {
     document.body.classList.add('desktop', `os-${window.desktop.platform}`);
+    window.desktop.onFlush?.(async () => { await flushSave(); await flushTeam(); });
     window.desktop.onUpdateReady(({ version }) => toast(`Local Notes ${version} is ready`, {
       kind: 'update', timeout: 0, action: { label: 'Restart to update', run: () => window.desktop.installUpdate() },
     }));

@@ -39,6 +39,48 @@ export function openHighlightMenu(editor, anchor) {
   ], anchor, { className: 'hl-menu' });
 }
 
+// Text colours (they read well on light and dark backgrounds) and sizes.
+export const TEXT_COLORS = [
+  ['Default', null], ['Gray', '#787774'], ['Brown', '#9F6B53'], ['Orange', '#D9730D'], ['Yellow', '#CB912F'],
+  ['Green', '#448361'], ['Blue', '#337EA9'], ['Purple', '#9065B0'], ['Pink', '#C14C8A'], ['Red', '#D44C47'],
+];
+export const FONT_SIZES = [['Small', '13px'], ['Default', null], ['Medium', '18px'], ['Large', '22px'], ['Larger', '28px'], ['Huge', '36px']];
+
+export function openTextColorMenu(editor, anchor) {
+  const current = editor.getAttributes('textStyle').color || null;
+  const grid = h(`<div class="tc-grid">${TEXT_COLORS.map(([name, color]) => `
+    <button class="tc-swatch ${current === color ? 'on' : ''}" data-color="${color || ''}" title="${esc(name)}" aria-label="${esc(name)} text">
+      <span style="color:${color || 'var(--text)'}">A</span></button>`).join('')}
+    <label class="tc-swatch tc-custom" title="Custom colour"><input type="color" value="${current && current.startsWith('#') ? current.slice(0, 7) : '#337ea9'}"><span>+</span></label></div>`);
+  grid.addEventListener('mousedown', (e) => { if (!e.target.closest('input')) e.preventDefault(); });
+  grid.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-color]');
+    if (!b) return;
+    editor.chain().focus().setTextColor(b.dataset.color || null).run();
+    document.querySelector('.menu')?.remove();
+  });
+  grid.querySelector('input[type=color]').addEventListener('change', (e) => {
+    editor.chain().focus().setTextColor(e.target.value).run();
+    document.querySelector('.menu')?.remove();
+  });
+  showMenu([{ header: 'Text colour' }, { custom: grid }], anchor, { className: 'hl-menu' });
+}
+
+export function openFontSizeMenu(editor, anchor) {
+  const current = editor.getAttributes('textStyle').fontSize || null;
+  showMenu([
+    { header: 'Text size' },
+    ...FONT_SIZES.map(([name, size]) => ({
+      custom: (() => {
+        const b = h(`<button class="menu-item fs-item ${current === size ? 'on' : ''}"><span class="mi-label" style="font-size:${size || 'var(--body-size)'}">${esc(name)}</span><span class="fs-px">${size || ''}</span>${current === size ? icon('check', 15) : ''}</button>`);
+        b.addEventListener('mousedown', (e) => e.preventDefault());
+        b.addEventListener('click', () => { editor.chain().focus().setFontSize(size).run(); document.querySelector('.menu')?.remove(); });
+        return b;
+      })(),
+    })),
+  ], anchor, { className: 'fs-menu' });
+}
+
 export function toggleList(editor, kind) {
   const c = editor.chain().focus();
   if (kind === 'bullet') c.toggleBulletList().run();
@@ -54,6 +96,8 @@ export const formatButtons = (modKey) => `
   <button data-cmd="strike" title="Strikethrough">${icon('strike', 16, 2)}</button>
   <button data-cmd="code" title="Inline code (${modKey}+E)">${icon('code', 16, 2)}</button>
   <button data-cmd="highlight" class="bb-hl" title="Highlight colour">${icon('highlight', 16, 2)}<i class="bb-hl-dot"></i></button>
+  <button data-cmd="textcolor" class="bb-tc" title="Text colour">${icon('text-color', 16, 2)}<i class="bb-tc-bar"></i></button>
+  <button data-cmd="fontsize" title="Text size">${icon('font-size', 16, 2)}</button>
   <span class="bb-sep"></span>
   <button data-cmd="bullet" title="Bulleted list">${icon('bullet', 16, 2)}</button>
   <button data-cmd="numbered" title="Numbered list">${icon('numbered', 16, 2)}</button>
@@ -69,6 +113,8 @@ export function runFormat(editor, cmd, button) {
     case 'strike': c.toggleStrike().run(); break;
     case 'code': c.toggleCode().run(); break;
     case 'highlight': openHighlightMenu(editor, button); break;
+    case 'textcolor': openTextColorMenu(editor, button); break;
+    case 'fontsize': openFontSizeMenu(editor, button); break;
     case 'bullet': toggleList(editor, 'bullet'); break;
     case 'numbered': toggleList(editor, 'numbered'); break;
     case 'todo': toggleList(editor, 'todo'); break;
@@ -82,6 +128,10 @@ export function syncFormat(editor, el) {
   el.querySelector('[data-cmd="bullet"]')?.classList.toggle('on', editor.isActive('bulletList'));
   el.querySelector('[data-cmd="numbered"]')?.classList.toggle('on', editor.isActive('orderedList'));
   el.querySelector('[data-cmd="todo"]')?.classList.toggle('on', editor.isActive('taskList'));
+  const ts = editor.getAttributes('textStyle');
+  const bar = el.querySelector('.bb-tc-bar');
+  if (bar) bar.style.background = ts.color || 'transparent';
+  el.querySelector('[data-cmd="fontsize"]')?.classList.toggle('on', !!ts.fontSize);
   const dot = el.querySelector('.bb-hl-dot');
   if (dot) {
     const color = editor.isActive('highlight') ? (editor.getAttributes('highlight').color || '#FFF3A3') : null;

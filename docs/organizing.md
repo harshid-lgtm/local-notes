@@ -24,7 +24,9 @@ Star a page (top-right) to pin it to **Favorites** at the top of the sidebar.
 Press `Ctrl K` (`⌘ K`) to search page names and content across your vault. From the same box you can:
 
 - press `Ctrl Enter` to create a page with the text you typed
-- type `>` to run commands — new page, today's note, graph view, AI, theme and more
+- type `>` to run commands — new page, today's note, graph view, AI, import, export, theme and more
+
+`Ctrl Shift F` opens the same search. To find text inside the page you're on, use `Ctrl F` (see [Find and replace](writing.md#find-and-replace)).
 
 ## Changes from other apps
 

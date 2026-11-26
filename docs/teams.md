@@ -35,16 +35,37 @@ Open a workspace's `•••` menu → **Share & members**. Workspace owners ca
 - **Invite with a link** for people who don't have an account yet. Links work for 14 days.
 - Change anyone's role, or remove them with **×**. Removing someone disconnects them from the workspace's pages immediately.
 
-## Share a page with selected people
+## Share a page (like Google Docs)
 
 Click **Share** at the top of any page — including pages in your private space.
 
-- **Invite people**: type a name or email, choose **Can edit** or **Can view**, and click **Invite**. You can pick several people at once. They're notified, and the page (with its subpages) appears under **Shared with me** in their sidebar if they aren't in that workspace.
-- **Change or remove access**: use the role menu or **×** next to a person. Changes apply live — someone viewing the page is switched to read-only or taken off it.
-- **General access** (team pages only): choose **Everyone in *workspace*** or **Only people invited**. Restricted pages, and their subpages, are hidden from everyone else in the workspace — including the sidebar, search, links, graph and Ask AI. A lock appears next to them in the sidebar.
+1. Start typing a name or email. Suggestions appear underneath, like in Gmail: people on this server, people you've shared with before (most recent first) and your [contacts](#contacts). Press `Enter` or click to add them; add as many as you like. Pasting a list of email addresses works too.
+2. Choose **Editor** or **Viewer**.
+3. Leave **Notify people** ticked, add a message if you like, and click **Send**.
+
+People who already have an account get an email (if your server has email set up) and a notification in their Inbox, and the page appears under **Shared with me**. **Anyone else gets an invitation**: they open the link, create their account with that email address, and land on the page. If email isn't set up, the dialog shows their invitation links to copy and send yourself.
+
+In the same window:
+
+- **People with access**: change someone to Editor or Viewer, or **Remove access**. Changes apply live: someone viewing the page is switched to read-only or taken off it. Invitations that haven't been accepted show as *Invited*; you can copy their link again or cancel them.
+- **General access**:
+  - **Only people invited**: hidden from everyone else in the workspace, including the sidebar, search, links, graph and Ask AI. A lock appears next to it in the sidebar.
+  - **Everyone in *workspace***: the usual for team pages.
+  - **Anyone with the link**: anyone signed in to this server who has the link can view (or edit, if you choose). They're added to the list when they open it; switching the link off removes them.
+- **Copy link** copies the page's address to paste anywhere.
 - Subpages inherit access from their parent; the dialog shows where someone's access comes from.
 
-The page's creator and workspace owners can change who has access. Anyone a page is shared with can remove themselves from the same dialog.
+Anyone who can edit a page can share it. Changing general access and removing people is for the page's creator and workspace owners. Admins can limit who may invite people from outside the server (Server admin → Server).
+
+## Contacts
+
+Your account menu → **Contacts** lists the people suggested when you share. People you share with are added automatically. To bring in your whole address book, export it and import the file:
+
+- **Gmail**: [Google Contacts](https://contacts.google.com) → **Export** → **Google CSV**
+- **Outlook**: People → **Manage contacts** → **Export contacts** (CSV)
+- **Apple Contacts / others**: export a **vCard** (`.vcf`)
+
+Imported contacts are private to you.
 
 ## Move pages between workspaces
 

@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import MarkdownIt from 'markdown-it';
 
 const NAV = [
-  ['Start here', [['README', 'Overview'], ['getting-started', 'Getting started'], ['writing', 'Writing'], ['organizing', 'Organizing']]],
+  ['Start here', [['README', 'Overview'], ['getting-started', 'Getting started'], ['writing', 'Writing'], ['organizing', 'Organizing'], ['import-export', 'Import, open & export']]],
   ['Go further', [['linking', 'Links, backlinks & graph'], ['templates', 'Templates & daily notes'], ['ai', 'AI assistant'], ['obsidian', 'Obsidian compatibility'], ['shortcuts', 'Keyboard shortcuts']]],
   ['Teams', [['teams', 'Working with your team'], ['self-hosting', 'Self-hosting the server']]],
   ['Help', [['faq', 'FAQ & troubleshooting']]],

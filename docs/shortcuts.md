@@ -12,6 +12,8 @@ On macOS use `⌘` where this page says `Ctrl`.
 | `Ctrl Alt N` | New page |
 | `Ctrl \` | Show or hide the sidebar |
 | `Ctrl S` | Save now (pages also save automatically) |
+| `Ctrl O` | Import or open files |
+| `Ctrl Shift F` | Search all pages |
 
 ## Editing
 
@@ -22,6 +24,9 @@ On macOS use `⌘` where this page says `Ctrl`.
 | `Ctrl B` / `Ctrl I` | Bold / italic |
 | `Ctrl E` | Inline code |
 | `Ctrl Shift H` | Highlight |
+| `Ctrl U` | Underline |
+| `Ctrl F` | Find in page |
+| `Ctrl H` | Find and replace |
 | `Ctrl K` (with text selected) | Add a link |
 | `Ctrl Z` / `Ctrl Shift Z` | Undo / redo |
 | `Tab` / `Shift Tab` | Indent / outdent list items |

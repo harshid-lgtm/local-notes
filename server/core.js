@@ -378,6 +378,45 @@ function createVaultServer({ configDir, publicDir }) {
       fs.writeFileSync(p, String(b.content || ''), 'utf8');
       return { path: relOf(v, p), name: stem(path.basename(p)) };
     },
+    // Save an imported image/file into <vault>/attachments; returns its vault path and a link
+    // relative to the note's folder.
+    'POST /api/attachment': (b) => {
+      const v = vaultOrError();
+      const data = Buffer.from(String(b.data || ''), 'base64');
+      if (!data.length) throw new ApiError(400, 'Empty file');
+      if (data.length > 100 * 1024 * 1024) throw new ApiError(413, 'File is larger than 100 MB');
+      const dir = safeJoin(v, 'attachments');
+      fs.mkdirSync(dir, { recursive: true });
+      const base = String(b.name || 'file').replace(/[\\/:*?"<>|#^[\]\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'file';
+      const p = uniquePath(path.join(dir, base));
+      fs.writeFileSync(p, data);
+      const rel = relOf(v, p);
+      const from = String(b.noteFolder || '').replace(/^\/+|\/+$/g, '');
+      // relative to the note's folder, without touching the server's working directory
+      const link = path.posix.relative(`/${from}`, `/${rel}`);
+      return { path: rel, link };
+    },
+    // Download a file or page from a web address for "Import from web address" (local app only).
+    'POST /api/fetch-url': async (b) => {
+      let u;
+      try { u = new URL(String(b.url || '').trim()); } catch { throw new ApiError(400, 'Enter a full web address, starting with https://'); }
+      if (!/^https?:$/.test(u.protocol)) throw new ApiError(400, 'Only http and https addresses are supported');
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 30000);
+      try {
+        const res = await fetch(u, { signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 (Local Notes importer)' } });
+        if (!res.ok) throw new ApiError(502, `The site answered ${res.status} ${res.statusText}`);
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 50 * 1024 * 1024) throw new ApiError(413, 'That file is larger than 50 MB');
+        const cd = res.headers.get('content-disposition') || '';
+        const fromHeader = /filename\*?=(?:UTF-8'')?"?([^";]+)/i.exec(cd)?.[1];
+        const name = decodeURIComponent(fromHeader || path.posix.basename(new URL(res.url).pathname) || 'page');
+        return { url: res.url, name, contentType: res.headers.get('content-type') || '', data: buf.toString('base64') };
+      } catch (e) {
+        if (e instanceof ApiError) throw e;
+        throw new ApiError(502, e.name === 'AbortError' ? 'The site took too long to answer' : `Couldn’t download it: ${e.cause?.code || e.message}`);
+      } finally { clearTimeout(t); }
+    },
     'POST /api/folder/create': (b) => {
       const v = vaultOrError();
       const parent = safeJoin(v, b.parent || '');

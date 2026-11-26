@@ -7,6 +7,7 @@ import {
   Flame, LogOut, HardDrive, FolderInput, Unlink, CircleAlert, ExternalLink, Feather, MessageSquare,
   Waypoints, LayoutTemplate, CalendarDays, ZoomIn, ZoomOut, Scan, Lock, Underline, Eraser,
   Users, UserPlus, Share2, Globe,
+  Baseline, ALargeSmall, FileDown, FileUp, Printer, Replace, Mail, Download, Upload, TextSearch, ChevronUp, CaseSensitive, WholeWord,
 } from 'lucide';
 
 const ICONS = {
@@ -22,7 +23,7 @@ const ICONS = {
   'page-link': FileSymlink, library: Library, grip: GripVertical, success: CircleCheck, flame: Flame,
   logout: LogOut, drive: HardDrive, move: FolderInput, unlink: Unlink, error: CircleAlert,
   external: ExternalLink, feather: Feather, note: MessageSquare,
-  graph: Waypoints, template: LayoutTemplate, calendar: CalendarDays, 'zoom-in': ZoomIn, 'zoom-out': ZoomOut, fit: Scan, lock: Lock, users: Users, 'user-plus': UserPlus, share: Share2, globe: Globe, underline: Underline, eraser: Eraser,
+  graph: Waypoints, template: LayoutTemplate, calendar: CalendarDays, 'zoom-in': ZoomIn, 'zoom-out': ZoomOut, fit: Scan, lock: Lock, 'text-color': Baseline, 'font-size': ALargeSmall, 'file-down': FileDown, 'file-up': FileUp, printer: Printer, replace: Replace, mail: Mail, download: Download, upload: Upload, 'text-search': TextSearch, 'chevron-up': ChevronUp, 'match-case': CaseSensitive, 'whole-word': WholeWord, users: Users, 'user-plus': UserPlus, share: Share2, globe: Globe, underline: Underline, eraser: Eraser,
 };
 
 const attrs = (a) => Object.entries(a).map(([k, v]) => `${k}="${v}"`).join(' ');

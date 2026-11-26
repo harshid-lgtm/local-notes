@@ -24,7 +24,13 @@ Shortcuts work as you type: `# ` for a heading, `- ` for a bullet, `1. ` for a n
 
 ## Formatting toolbar
 
-Select text to see the toolbar: **Ask AI**, turn the block into another type, bold, italic, strikethrough, code, highlight and link. Paste a URL to make a link, or type a page name to link to that page.
+Select text to see the toolbar: **Ask AI**, turn the block into another type, bold, italic, underline, strikethrough, code, **highlight colour**, **text colour**, **text size**, lists and link. Paste a URL to make a link, or type a page name to link to that page.
+
+Text colour and size are saved as a small `<span style="…">` tag in the markdown, which Obsidian also shows. The colour picker's **+** chooses any colour.
+
+## Find and replace
+
+Press `Ctrl F` (`⌘ F`) to find text in the page: every match is highlighted, `Enter` and `Shift Enter` jump between them, and you can match case or whole words. Press `Ctrl H` to replace one match or all of them. Both are also in the page's `•••` menu.
 
 ## Moving blocks
 
@@ -47,4 +53,4 @@ Images in your vault display inline — both `![alt](images/photo.png)` and Obsi
 
 ## Page style
 
-Open the `•••` page menu to choose **Default**, **Serif** or **Mono** fonts, **Small text** or **Full width**. These are view preferences and don't change your files.
+Open the `•••` page menu to choose **Default**, **Serif** or **Mono** fonts, the **text size** (four sizes, from small to extra large) and **Full width**. These are view preferences and don't change your files. In team workspaces the text size is under your account menu → **Appearance**.
